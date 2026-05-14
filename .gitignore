@@ -1,0 +1,4 @@
+statuslog
+*.db
+*.sqlite
+*.sqlite3
