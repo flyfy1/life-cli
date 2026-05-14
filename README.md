@@ -1,6 +1,6 @@
-# statuslog-go
+# life-cli
 
-`statuslog-go` is a small standalone Go CLI for recording local status logs and best-effort syncing them to a LifeOnGolang-compatible sync API.
+`life-cli` is a small standalone Go CLI for recording local status logs and best-effort syncing them to a LifeOnGolang-compatible sync API.
 
 It is intentionally independent from the main `life-on-golang` backend codebase. The sync payload is defined locally in this project, and local persistence uses SQLite.
 
@@ -15,15 +15,15 @@ It is intentionally independent from the main `life-on-golang` backend codebase.
 ## Install
 
 ```bash
-go build -o statuslog .
+go build -o life .
 ```
 
 ## Usage
 
 ```bash
-./statuslog log ai "Refactored the sync handler"
-./statuslog log mood "Feeling focused today"
-./statuslog sync
+./life log ai "Refactored the sync handler"
+./life log mood "Feeling focused today"
+./life sync
 ```
 
 ## Environment variables

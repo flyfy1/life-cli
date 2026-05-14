@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/songyy/statuslog-go/internal/statuslog"
+	"github.com/flyfy1/life-cli/internal/statuslog"
 )
 
 func main() {
@@ -90,6 +90,6 @@ func run(ctx context.Context, args []string) error {
 
 func printUsage(out *os.File) {
 	fmt.Fprintln(out, `usage:
-  statuslog log <type> "<content>"
-  statuslog sync`)
+  life log <type> "<content>"
+  life sync`)
 }

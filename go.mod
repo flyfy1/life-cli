@@ -1,4 +1,4 @@
-module github.com/songyy/statuslog-go
+module github.com/flyfy1/life-cli
 
 go 1.24.0
 
