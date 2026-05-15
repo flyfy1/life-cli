@@ -3,6 +3,7 @@ package statuslog
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const defaultAPIURL = "https://api.integ.life"
@@ -15,10 +16,35 @@ type Config struct {
 
 func LoadConfig() Config {
 	return Config{
-		APIURL:   firstNonEmpty(os.Getenv("STATUSLOG_API_URL"), os.Getenv("LIFE_API_URL"), defaultAPIURL),
-		APIToken: firstNonEmpty(os.Getenv("STATUSLOG_API_TOKEN"), os.Getenv("LIFE_API_TOKEN")),
-		DBPath:   firstNonEmpty(os.Getenv("STATUSLOG_DB_PATH"), os.Getenv("LIFE_DB_PATH"), defaultDBPath()),
+		APIURL:   firstNonEmpty(os.Getenv("STATUSLOG_API_URL"), defaultAPIURL),
+		APIToken: loadAPIToken(),
+		DBPath:   firstNonEmpty(os.Getenv("STATUSLOG_DB_PATH"), defaultDBPath()),
 	}
+}
+
+func loadAPIToken() string {
+	path := tokenFilePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func SaveAPIToken(token string) error {
+	path := tokenFilePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(token+"\n"), 0600)
+}
+
+func tokenFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ".statuslog/token"
+	}
+	return filepath.Join(home, ".statuslog", "token")
 }
 
 func defaultDBPath() string {

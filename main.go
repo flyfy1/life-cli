@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/flyfy1/life-cli/internal/statuslog"
+	"golang.org/x/term"
 )
 
 func main() {
@@ -78,6 +81,32 @@ func run(ctx context.Context, args []string) error {
 		}
 		return nil
 
+	case "login":
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("username: ")
+		username, _ := reader.ReadString('\n')
+		username = strings.TrimSpace(username)
+
+		fmt.Print("password: ")
+		passBytes, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		if err != nil {
+			return fmt.Errorf("read password: %w", err)
+		}
+		password := strings.TrimSpace(string(passBytes))
+
+		token, err := client.Login(ctx, username, password)
+		if err != nil {
+			return fmt.Errorf("login failed: %w", err)
+		}
+
+		if err := statuslog.SaveAPIToken(token); err != nil {
+			return fmt.Errorf("save token: %w", err)
+		}
+
+		fmt.Println("login ok: token saved")
+		return nil
+
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return nil
@@ -90,6 +119,7 @@ func run(ctx context.Context, args []string) error {
 
 func printUsage(out *os.File) {
 	fmt.Fprintln(out, `usage:
+  life login
   life log <type> "<content>"
   life sync`)
 }
