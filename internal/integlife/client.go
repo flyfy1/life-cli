@@ -1,4 +1,4 @@
-package statuslog
+package integlife
 
 import (
 	"bytes"
@@ -97,7 +97,7 @@ func (c *Client) Login(ctx context.Context, username, password string) (string, 
 
 func (c *Client) SyncRecord(ctx context.Context, record Record) (string, error) {
 	if !c.CanSync() {
-		return "", fmt.Errorf("STATUSLOG_API_TOKEN not set")
+		return "", fmt.Errorf("INTEGLIFE_API_TOKEN not set")
 	}
 
 	body, err := json.Marshal(buildSyncPayload(record))

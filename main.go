@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/flyfy1/life-cli/internal/statuslog"
+	"github.com/flyfy1/life-cli/internal/integlife"
 	"golang.org/x/term"
 )
 
@@ -22,16 +22,16 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
-	cfg := statuslog.LoadConfig()
+	cfg := integlife.LoadConfig()
 
-	store, err := statuslog.OpenStore(cfg.DBPath)
+	store, err := integlife.OpenStore(cfg.DBPath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	client := statuslog.NewClient(cfg.APIURL, cfg.APIToken, 10*time.Second)
-	service := statuslog.NewService(store, client)
+	client := integlife.NewClient(cfg.APIURL, cfg.APIToken, 10*time.Second)
+	service := integlife.NewService(store, client)
 
 	if len(args) == 0 {
 		printUsage(os.Stderr)
@@ -100,7 +100,7 @@ func run(ctx context.Context, args []string) error {
 			return fmt.Errorf("login failed: %w", err)
 		}
 
-		if err := statuslog.SaveAPIToken(token); err != nil {
+		if err := integlife.SaveAPIToken(token); err != nil {
 			return fmt.Errorf("save token: %w", err)
 		}
 

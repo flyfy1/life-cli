@@ -1,4 +1,4 @@
-package statuslog
+package integlife
 
 import (
 	"path/filepath"
@@ -7,7 +7,7 @@ import (
 )
 
 func TestStoreInsertPendingAndMarkSynced(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "statuslog.db"))
+	store, err := OpenStore(filepath.Join(t.TempDir(), "integlife.db"))
 	if err != nil {
 		t.Fatalf("OpenStore() error = %v", err)
 	}

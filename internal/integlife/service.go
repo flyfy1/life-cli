@@ -1,4 +1,4 @@
-package statuslog
+package integlife
 
 import (
 	"context"
@@ -38,7 +38,7 @@ func (s *Service) LogAndMaybeSync(ctx context.Context, logType, content string) 
 	}
 
 	if !s.client.CanSync() {
-		return record, false, "STATUSLOG_API_TOKEN not set", nil
+		return record, false, "INTEGLIFE_API_TOKEN not set", nil
 	}
 
 	detail, err := s.client.SyncRecord(ctx, record)
@@ -56,7 +56,7 @@ func (s *Service) LogAndMaybeSync(ctx context.Context, logType, content string) 
 
 func (s *Service) SyncPending(ctx context.Context) (SyncResult, error) {
 	if !s.client.CanSync() {
-		return SyncResult{}, fmt.Errorf("STATUSLOG_API_TOKEN not set")
+		return SyncResult{}, fmt.Errorf("INTEGLIFE_API_TOKEN not set")
 	}
 
 	pending, err := s.store.Pending()

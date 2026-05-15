@@ -1,4 +1,4 @@
-package statuslog
+package integlife
 
 import (
 	"os"
@@ -16,9 +16,9 @@ type Config struct {
 
 func LoadConfig() Config {
 	return Config{
-		APIURL:   firstNonEmpty(os.Getenv("STATUSLOG_API_URL"), defaultAPIURL),
+		APIURL:   firstNonEmpty(os.Getenv("INTEGLIFE_API_URL"), defaultAPIURL),
 		APIToken: loadAPIToken(),
-		DBPath:   firstNonEmpty(os.Getenv("STATUSLOG_DB_PATH"), defaultDBPath()),
+		DBPath:   firstNonEmpty(os.Getenv("INTEGLIFE_DB_PATH"), defaultDBPath()),
 	}
 }
 
@@ -42,17 +42,17 @@ func SaveAPIToken(token string) error {
 func tokenFilePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return ".statuslog/token"
+		return ".integlife/token"
 	}
-	return filepath.Join(home, ".statuslog", "token")
+	return filepath.Join(home, ".integlife", "token")
 }
 
 func defaultDBPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return ".statuslog/statuslog.db"
+		return ".integlife/integlife.db"
 	}
-	return filepath.Join(home, ".statuslog", "statuslog.db")
+	return filepath.Join(home, ".integlife", "integlife.db")
 }
 
 func firstNonEmpty(values ...string) string {

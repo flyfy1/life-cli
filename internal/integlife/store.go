@@ -1,4 +1,4 @@
-package statuslog
+package integlife
 
 import (
 	"database/sql"
