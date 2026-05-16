@@ -14,6 +14,8 @@ import (
 	"golang.org/x/term"
 )
 
+var Version = "dev"
+
 // Mood represents the user's emotional state when logging.
 type Mood string
 
@@ -71,6 +73,10 @@ func run(ctx context.Context, args []string) error {
 
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
+		return nil
+
+	case "version", "-v", "--version":
+		fmt.Printf("life version %s\n", Version)
 		return nil
 	}
 
