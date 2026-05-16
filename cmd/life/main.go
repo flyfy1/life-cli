@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/flyfy1/life/internal/integlife"
+	"github.com/flyfy1/life-cli/internal/integlife"
 	"golang.org/x/term"
 )
 

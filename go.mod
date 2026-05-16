@@ -1,4 +1,4 @@
-module github.com/flyfy1/life
+module github.com/flyfy1/life-cli
 
 go 1.25.0
 
