@@ -1,6 +1,7 @@
 package integlife
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,15 @@ func SaveAPIToken(token string) error {
 		return err
 	}
 	return os.WriteFile(path, []byte(token+"\n"), 0600)
+}
+
+func DeleteAPIToken() error {
+	path := tokenFilePath()
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func tokenFilePath() string {
