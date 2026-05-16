@@ -14,17 +14,59 @@ It is intentionally independent from the main `life-on-golang` backend codebase.
 
 ## Install
 
+### Download Pre-built Binary
+
+Visit the [Releases page](https://github.com/flyfy1/life-cli/releases) and download the binary for your platform:
+
+- **macOS Intel (x86_64)**: `life-*-darwin-amd64`
+- **macOS Apple Silicon (ARM64)**: `life-*-darwin-arm64`
+- **Linux x86_64**: `life-*-linux-amd64`
+- **Linux ARM64**: `life-*-linux-arm64`
+- **Windows x86_64**: `life-*-windows-amd64.exe`
+
 ```bash
-go build -o life .
+# Make the binary executable (macOS/Linux only)
+chmod +x life-*
+
+# Verify the download
+./life --version
+
+# Optionally move to a location in your PATH
+mv life-* /usr/local/bin/life
 ```
+
+### Build from Source
+
+```bash
+go build -o life ./cmd/life
+```
+
+### Build for Multiple Architectures
+
+```bash
+./build.sh v1.0.0
+```
+
+This creates binaries for all supported platforms in the `./build` directory and generates SHA256 checksums.
 
 ## Usage
 
 ```bash
-./life log ai "Refactored the sync handler"
-./life log mood "Feeling focused today"
+./life "Refactored the sync handler"
+./life ai "GPT-4 is getting interesting"
+./life work "deep work session" --mood focused
 ./life sync
 ```
+
+### Commands
+
+- `life '<content>'` - Record a thought with default category
+- `life <category> '<content>'` - Record with a specific category
+- `life ... --mood <mood>` - Attach a mood to the entry
+- `life login` - Authenticate and save API token
+- `life logout` - Remove saved API token
+- `life sync` - Push all pending entries to the server
+- `life --version` - Show version
 
 ## Environment variables
 
