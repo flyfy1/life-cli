@@ -127,20 +127,21 @@ func (c *Client) SyncRecord(ctx context.Context, record Record) (string, error) 
 }
 
 type syncPayload struct {
-	SyncModels        []string        `json:"sync_models"`
-	Notes             []any           `json:"notes"`
-	Comments          []any           `json:"comments"`
-	MoneyCurrencies   []any           `json:"money_currencies"`
-	MoneyTransactions []any           `json:"money_transactions"`
-	MoneyBooks        []any           `json:"money_books"`
-	MoneyBookMembers  []any           `json:"money_book_members"`
-	Goals             []any           `json:"goals"`
-	GoalMilestones    []any           `json:"goal_milestones"`
-	GoalCheckins      []any           `json:"goal_checkins"`
-	Todos             []any           `json:"todos"`
-	Events            []any           `json:"events"`
-	Pomodoros         []any           `json:"pomodoros"`
-	StatusLogs        []syncStatusLog `json:"status_logs"`
+	SyncModels        []string           `json:"sync_models"`
+	LastSyncAtByModel map[string]*string `json:"last_sync_at_by_model"`
+	Notes             []any              `json:"notes"`
+	Comments          []any              `json:"comments"`
+	MoneyCurrencies   []any              `json:"money_currencies"`
+	MoneyTransactions []any              `json:"money_transactions"`
+	MoneyBooks        []any              `json:"money_books"`
+	MoneyBookMembers  []any              `json:"money_book_members"`
+	Goals             []any              `json:"goals"`
+	GoalMilestones    []any              `json:"goal_milestones"`
+	GoalCheckins      []any              `json:"goal_checkins"`
+	Todos             []any              `json:"todos"`
+	Events            []any              `json:"events"`
+	Pomodoros         []any              `json:"pomodoros"`
+	StatusLogs        []syncStatusLog    `json:"status_logs"`
 }
 
 type syncStatusLog struct {
@@ -156,6 +157,7 @@ type syncStatusLog struct {
 func buildSyncPayload(record Record) syncPayload {
 	return syncPayload{
 		SyncModels:        []string{"status_logs"},
+		LastSyncAtByModel: map[string]*string{"status_logs": nil},
 		Notes:             []any{},
 		Comments:          []any{},
 		MoneyCurrencies:   []any{},
