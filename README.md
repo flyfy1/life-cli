@@ -10,7 +10,7 @@ It is intentionally independent from the main `life-on-golang` backend codebase.
 - Best-effort sync to `/api/notes/sync`
 - Keep working offline when the network or token is unavailable
 - Retry unsynced records later with `sync`
-- Compatible with the old `LIFE_*` environment variables
+- Track AI task runs and progress events locally first
 
 ## Install
 
@@ -55,6 +55,9 @@ This creates binaries for all supported platforms in the `./build` directory and
 ./life "Refactored the sync handler"
 ./life ai "GPT-4 is getting interesting"
 ./life work "deep work session" --mood focused
+./life ai start --project goal:<uuid> --todo <uuid> --title "Implement sync" --agent codex --json
+./life ai progress --run <run_uuid> --phase coding --summary "Wrote local storage"
+./life ai complete --run <run_uuid> --summary "Finished implementation"
 ./life sync
 ```
 
@@ -66,27 +69,24 @@ This creates binaries for all supported platforms in the `./build` directory and
 - `life login` - Authenticate and save API token
 - `life logout` - Remove saved API token
 - `life sync` - Push all pending entries to the server
+- `life ai start/progress/heartbeat/event/block/complete/status/resume/resolve` - Track AI task execution progress
 - `life --version` - Show version
 
 ## Environment variables
 
 Primary variables:
 
-- `STATUSLOG_API_URL` default: `https://api.integ.life`
-- `STATUSLOG_API_TOKEN` bearer token for sync
-- `STATUSLOG_DB_PATH` default: `~/.statuslog/statuslog.db`
-
-Backward-compatible aliases:
-
-- `LIFE_API_URL`
-- `LIFE_API_TOKEN`
-- `LIFE_DB_PATH`
+- `INTEGLIFE_API_URL` default: `https://api.integ.life`
+- `INTEGLIFE_API_TOKEN` bearer token for sync, stored by `life login`
+- `INTEGLIFE_DB_PATH` default: `~/.integlife/integlife.db`
+- `LIFE_AI_SESSION_ID` optional AI run session id used by `life ai resume`
 
 ## Behavior
 
 - `log` writes to the local SQLite database immediately.
 - If a token is configured, `log` also tries to sync the new record right away.
 - `sync` sends every unsynced record in timestamp order.
+- AI task events use a canonical SHA-256 payload hash. `metadata-json` must not contain JSON numbers; use strings for numeric values.
 - Sync failures do not delete local data.
 
 ## API compatibility

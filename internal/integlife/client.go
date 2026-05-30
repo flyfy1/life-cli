@@ -96,34 +96,47 @@ func (c *Client) Login(ctx context.Context, username, password string) (string, 
 }
 
 func (c *Client) SyncRecord(ctx context.Context, record Record) (string, error) {
+	ack, err := c.SyncRecords(ctx, SyncBatch{StatusLogs: []Record{record}})
+	if err != nil {
+		return "", err
+	}
+	return ack.Detail, nil
+}
+
+func (c *Client) SyncRecords(ctx context.Context, batch SyncBatch) (SyncAck, error) {
 	if !c.CanSync() {
-		return "", fmt.Errorf("INTEGLIFE_API_TOKEN not set")
+		return SyncAck{}, fmt.Errorf("INTEGLIFE_API_TOKEN not set")
 	}
 
-	body, err := json.Marshal(buildSyncPayload(record))
+	payload := buildSyncBatchPayload(batch)
+	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal sync payload: %w", err)
+		return SyncAck{}, fmt.Errorf("marshal sync payload: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL+"/api/notes/sync", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("build sync request: %w", err)
+		return SyncAck{}, fmt.Errorf("build sync request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("send sync request: %w", err)
+		return SyncAck{}, fmt.Errorf("send sync request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		return "", fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return SyncAck{}, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 
-	return resp.Status, nil
+	var syncResp syncResponse
+	if err := json.NewDecoder(resp.Body).Decode(&syncResp); err != nil {
+		return SyncAck{}, fmt.Errorf("decode sync response: %w", err)
+	}
+	return buildSyncAck(batch, syncResp, resp.Status), nil
 }
 
 type syncPayload struct {
@@ -142,6 +155,8 @@ type syncPayload struct {
 	Events            []any              `json:"events"`
 	Pomodoros         []any              `json:"pomodoros"`
 	StatusLogs        []syncStatusLog    `json:"status_logs"`
+	AITaskRuns        []syncAITaskRun    `json:"ai_task_runs"`
+	AITaskEvents      []syncAITaskEvent  `json:"ai_task_events"`
 }
 
 type syncStatusLog struct {
@@ -155,9 +170,166 @@ type syncStatusLog struct {
 }
 
 func buildSyncPayload(record Record) syncPayload {
+	return buildSyncBatchPayload(SyncBatch{StatusLogs: []Record{record}})
+}
+
+type syncAITaskRun struct {
+	UUID                string  `json:"uuid"`
+	UserID              int     `json:"user_id"`
+	BookID              int     `json:"book_id"`
+	ProjectType         string  `json:"project_type"`
+	ProjectUUID         string  `json:"project_uuid"`
+	TodoUUID            string  `json:"todo_uuid"`
+	ParentRunUUID       string  `json:"parent_run_uuid"`
+	AgentName           string  `json:"agent_name"`
+	Status              string  `json:"status"`
+	Title               string  `json:"title"`
+	LatestPhase         string  `json:"latest_phase"`
+	LatestSummary       string  `json:"latest_summary"`
+	ContextSnapshotJSON string  `json:"context_snapshot_json"`
+	StartedAt           *string `json:"started_at,omitempty"`
+	LastHeartbeatAt     *string `json:"last_heartbeat_at,omitempty"`
+	CompletedAt         *string `json:"completed_at,omitempty"`
+	DeletedAt           *string `json:"deleted_at,omitempty"`
+	CreatedAt           string  `json:"created_at"`
+	UpdatedAt           string  `json:"updated_at"`
+	ClientCreatedAt     string  `json:"client_created_at"`
+	ClientUpdatedAt     string  `json:"client_updated_at"`
+}
+
+type syncAITaskEvent struct {
+	UUID               string `json:"uuid"`
+	UserID             int    `json:"user_id"`
+	BookID             int    `json:"book_id"`
+	RunUUID            string `json:"run_uuid"`
+	TodoUUID           string `json:"todo_uuid"`
+	EventType          string `json:"event_type"`
+	Severity           string `json:"severity"`
+	Title              string `json:"title"`
+	Content            string `json:"content"`
+	MetadataJSON       string `json:"metadata_json"`
+	PayloadHashVersion int    `json:"payload_hash_version"`
+	PayloadHash        string `json:"payload_hash"`
+	OccurredAt         string `json:"occurred_at"`
+	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
+	ClientCreatedAt    string `json:"client_created_at"`
+	ClientUpdatedAt    string `json:"client_updated_at"`
+}
+
+type syncResponse struct {
+	ServerTime             string            `json:"server_time"`
+	AITaskRunsServerNewer  []syncResponseRun `json:"ai_task_runs_server_newer"`
+	AITaskRunsOnlyOnServer []syncResponseRun `json:"ai_task_runs_only_on_server"`
+	AITaskEventsAccepted   []string          `json:"ai_task_events_accepted"`
+	AITaskEventsDuplicate  []string          `json:"ai_task_events_duplicate"`
+	AITaskEventsRejected   []syncEventReject `json:"ai_task_events_rejected"`
+}
+
+type syncResponseRun struct {
+	UUID string `json:"uuid"`
+}
+
+type syncEventReject struct {
+	UUID   string `json:"uuid"`
+	Reason string `json:"reason"`
+}
+
+func buildSyncBatchPayload(batch SyncBatch) syncPayload {
+	models := []string{}
+	if len(batch.StatusLogs) > 0 {
+		models = append(models, "status_logs")
+	}
+	if len(batch.AITaskRuns) > 0 {
+		models = append(models, "ai_task_runs")
+	}
+	if len(batch.AITaskEvents) > 0 {
+		models = append(models, "ai_task_events")
+	}
+	if len(models) == 0 {
+		models = []string{"status_logs", "ai_task_runs", "ai_task_events"}
+	}
+	lastSyncAtByModel := map[string]*string{}
+	for _, model := range models {
+		if model == "status_logs" {
+			lastSyncAtByModel[model] = nil
+			continue
+		}
+		if cursor, ok := batch.Cursors[model]; ok && !cursor.IsZero() {
+			formatted := cursor.UTC().Format(time.RFC3339Nano)
+			lastSyncAtByModel[model] = &formatted
+		} else {
+			formatted := time.Now().UTC().Format(time.RFC3339Nano)
+			lastSyncAtByModel[model] = &formatted
+		}
+	}
+
+	statusLogs := make([]syncStatusLog, 0, len(batch.StatusLogs))
+	for _, record := range batch.StatusLogs {
+		statusLogs = append(statusLogs, syncStatusLog{
+			UUID:      record.UUID,
+			LoggedAt:  record.LoggedAt.UTC().Format(time.RFC3339Nano),
+			CreatedAt: record.CreatedAt.UTC().Format(time.RFC3339Nano),
+			UpdatedAt: record.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			UserID:    0,
+			LogType:   record.LogType,
+			Content:   record.Content,
+		})
+	}
+
+	runs := make([]syncAITaskRun, 0, len(batch.AITaskRuns))
+	for _, run := range batch.AITaskRuns {
+		runs = append(runs, syncAITaskRun{
+			UUID:                run.UUID,
+			UserID:              0,
+			BookID:              0,
+			ProjectType:         run.ProjectType,
+			ProjectUUID:         run.ProjectUUID,
+			TodoUUID:            run.TodoUUID,
+			ParentRunUUID:       run.ParentRunUUID,
+			AgentName:           run.AgentName,
+			Status:              run.Status,
+			Title:               run.Title,
+			LatestPhase:         run.LatestPhase,
+			LatestSummary:       run.LatestSummary,
+			ContextSnapshotJSON: emptyJSON(run.ContextSnapshotJSON),
+			StartedAt:           timePtrString(run.StartedAt),
+			LastHeartbeatAt:     timePtrString(run.LastHeartbeatAt),
+			CompletedAt:         timePtrString(run.CompletedAt),
+			DeletedAt:           timePtrString(run.DeletedAt),
+			CreatedAt:           run.CreatedAt.UTC().Format(time.RFC3339Nano),
+			UpdatedAt:           run.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			ClientCreatedAt:     run.ClientCreatedAt.UTC().Format(time.RFC3339Nano),
+			ClientUpdatedAt:     run.ClientUpdatedAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+
+	events := make([]syncAITaskEvent, 0, len(batch.AITaskEvents))
+	for _, event := range batch.AITaskEvents {
+		events = append(events, syncAITaskEvent{
+			UUID:               event.UUID,
+			UserID:             0,
+			BookID:             0,
+			RunUUID:            event.RunUUID,
+			TodoUUID:           event.TodoUUID,
+			EventType:          event.EventType,
+			Severity:           event.Severity,
+			Title:              event.Title,
+			Content:            event.Content,
+			MetadataJSON:       emptyJSON(event.MetadataJSON),
+			PayloadHashVersion: event.PayloadHashVersion,
+			PayloadHash:        event.PayloadHash,
+			OccurredAt:         event.OccurredAt.UTC().Format(time.RFC3339Nano),
+			CreatedAt:          event.CreatedAt.UTC().Format(time.RFC3339Nano),
+			UpdatedAt:          event.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			ClientCreatedAt:    event.ClientCreatedAt.UTC().Format(time.RFC3339Nano),
+			ClientUpdatedAt:    event.ClientUpdatedAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+
 	return syncPayload{
-		SyncModels:        []string{"status_logs"},
-		LastSyncAtByModel: map[string]*string{"status_logs": nil},
+		SyncModels:        models,
+		LastSyncAtByModel: lastSyncAtByModel,
 		Notes:             []any{},
 		Comments:          []any{},
 		MoneyCurrencies:   []any{},
@@ -170,16 +342,70 @@ func buildSyncPayload(record Record) syncPayload {
 		Todos:             []any{},
 		Events:            []any{},
 		Pomodoros:         []any{},
-		StatusLogs: []syncStatusLog{
-			{
-				UUID:      record.UUID,
-				LoggedAt:  record.LoggedAt.UTC().Format(time.RFC3339Nano),
-				CreatedAt: record.CreatedAt.UTC().Format(time.RFC3339Nano),
-				UpdatedAt: record.UpdatedAt.UTC().Format(time.RFC3339Nano),
-				UserID:    0,
-				LogType:   record.LogType,
-				Content:   record.Content,
-			},
-		},
+		StatusLogs:        statusLogs,
+		AITaskRuns:        runs,
+		AITaskEvents:      events,
 	}
+}
+
+func buildSyncAck(batch SyncBatch, resp syncResponse, detail string) SyncAck {
+	serverTime := time.Now().UTC()
+	if resp.ServerTime != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, resp.ServerTime); err == nil {
+			serverTime = parsed.UTC()
+		}
+	}
+
+	runConflicts := map[string]bool{}
+	for _, run := range resp.AITaskRunsServerNewer {
+		runConflicts[run.UUID] = true
+	}
+	ack := SyncAck{
+		StatusLogUUIDs:    make([]string, 0, len(batch.StatusLogs)),
+		AITaskRunSynced:   []string{},
+		AITaskEventSynced: []string{},
+		AITaskEventErrors: map[string]string{},
+		ServerTime:        serverTime,
+		Detail:            detail,
+	}
+	for _, record := range batch.StatusLogs {
+		ack.StatusLogUUIDs = append(ack.StatusLogUUIDs, record.UUID)
+	}
+	for _, run := range batch.AITaskRuns {
+		if runConflicts[run.UUID] {
+			ack.AITaskRunConflicts = append(ack.AITaskRunConflicts, run.UUID)
+			continue
+		}
+		ack.AITaskRunSynced = append(ack.AITaskRunSynced, run.UUID)
+	}
+
+	eventOK := map[string]bool{}
+	for _, uuid := range resp.AITaskEventsAccepted {
+		eventOK[uuid] = true
+	}
+	for _, uuid := range resp.AITaskEventsDuplicate {
+		eventOK[uuid] = true
+	}
+	for _, reject := range resp.AITaskEventsRejected {
+		ack.AITaskEventErrors[reject.UUID] = reject.Reason
+	}
+	for _, event := range batch.AITaskEvents {
+		switch {
+		case eventOK[event.UUID]:
+			ack.AITaskEventSynced = append(ack.AITaskEventSynced, event.UUID)
+		case ack.AITaskEventErrors[event.UUID] != "":
+			// Keep pending with the server-provided reason.
+		default:
+			ack.AITaskEventErrors[event.UUID] = "missing event ack"
+		}
+	}
+	return ack
+}
+
+func timePtrString(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	formatted := value.UTC().Format(time.RFC3339Nano)
+	return &formatted
 }

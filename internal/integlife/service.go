@@ -4,7 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -12,6 +16,42 @@ type Service struct {
 	store  *Store
 	client *Client
 	now    func() time.Time
+}
+
+type AIStartOptions struct {
+	Project         string
+	TodoUUID        string
+	Title           string
+	AgentName       string
+	SessionID       string
+	SessionExplicit bool
+	NewRun          bool
+}
+
+type AIResumeOptions struct {
+	Project         string
+	TodoUUID        string
+	AgentName       string
+	SessionID       string
+	SessionExplicit bool
+	NewRun          bool
+	Title           string
+}
+
+type AIEventOptions struct {
+	RunUUID      string
+	EventType    string
+	Severity     string
+	Title        string
+	Content      string
+	MetadataJSON string
+}
+
+type AICommandResult struct {
+	Run        AITaskRunRecord
+	Event      *AITaskEventRecord
+	Synced     bool
+	SyncDetail string
 }
 
 func NewService(store *Store, client *Client) *Service {
@@ -41,17 +81,17 @@ func (s *Service) LogAndMaybeSync(ctx context.Context, logType, content string) 
 		return record, false, "INTEGLIFE_API_TOKEN not set", nil
 	}
 
-	detail, err := s.client.SyncRecord(ctx, record)
+	result, err := s.SyncPending(ctx)
 	if err != nil {
 		return record, false, err.Error(), nil
 	}
+	if len(result.Failures) > 0 {
+		return record, false, result.Failures[0].Detail, nil
+	}
 
 	syncedAt := s.now().UTC()
-	if err := s.store.MarkSynced(record.UUID, syncedAt); err != nil {
-		return Record{}, false, "", err
-	}
 	record.SyncedAt = &syncedAt
-	return record, true, detail, nil
+	return record, true, fmt.Sprintf("synced=%d pending=%d", result.Synced, result.Pending), nil
 }
 
 func (s *Service) SyncPending(ctx context.Context) (SyncResult, error) {
@@ -59,29 +99,430 @@ func (s *Service) SyncPending(ctx context.Context) (SyncResult, error) {
 		return SyncResult{}, fmt.Errorf("INTEGLIFE_API_TOKEN not set")
 	}
 
-	pending, err := s.store.Pending()
+	batch, err := s.store.PendingSyncBatch()
 	if err != nil {
 		return SyncResult{}, err
 	}
-
-	result := SyncResult{Pending: len(pending)}
-	for _, record := range pending {
-		detail, err := s.client.SyncRecord(ctx, record)
-		if err != nil {
-			result.Failures = append(result.Failures, SyncFailure{
-				UUID:   record.UUID,
-				Detail: err.Error(),
-			})
-			continue
-		}
-
-		if err := s.store.MarkSynced(record.UUID, s.now().UTC()); err != nil {
-			return SyncResult{}, fmt.Errorf("mark synced for %s after %s: %w", record.UUID, detail, err)
-		}
-		result.Synced++
+	pendingCount := len(batch.StatusLogs) + len(batch.AITaskRuns) + len(batch.AITaskEvents)
+	result := SyncResult{Pending: pendingCount}
+	if pendingCount == 0 {
+		return result, nil
 	}
 
+	ack, err := s.client.SyncRecords(ctx, batch)
+	if err != nil {
+		if markErr := s.markBatchSyncError(batch, err.Error()); markErr != nil {
+			return SyncResult{}, markErr
+		}
+		result.Failures = append(result.Failures, failuresForBatch(batch, err.Error())...)
+		return result, nil
+	}
+	if err := s.applySyncAck(ack); err != nil {
+		return SyncResult{}, err
+	}
+
+	result.Synced = len(ack.StatusLogUUIDs) + len(ack.AITaskRunSynced) + len(ack.AITaskEventSynced)
+	for _, uuid := range ack.AITaskRunConflicts {
+		result.Failures = append(result.Failures, SyncFailure{UUID: uuid, Detail: "conflict: server newer"})
+	}
+	for uuid, detail := range ack.AITaskEventErrors {
+		result.Failures = append(result.Failures, SyncFailure{UUID: uuid, Detail: detail})
+	}
 	return result, nil
+}
+
+func (s *Service) StartAITask(ctx context.Context, opts AIStartOptions) (AICommandResult, error) {
+	now := s.now().UTC()
+	projectType, projectUUID, err := ParseProjectRef(opts.Project)
+	if err != nil {
+		return AICommandResult{}, err
+	}
+	agentName := defaultString(opts.AgentName, "codex")
+	sessionID := ResolveAISessionID(opts.SessionID)
+	cwd := currentWorkingDir()
+	scopeKey := ScopeKey(cwd, projectType, projectUUID, opts.TodoUUID, agentName)
+
+	if !opts.NewRun && !opts.SessionExplicit {
+		running, err := s.store.RunningRunsForScope(scopeKey)
+		if err != nil {
+			return AICommandResult{}, err
+		}
+		if len(running) > 1 {
+			return AICommandResult{}, fmt.Errorf("multiple running AI runs exist for this scope; pass --session <id> or --new")
+		}
+	}
+
+	run := AITaskRunRecord{
+		UUID:                newUUID(),
+		ProjectType:         projectType,
+		ProjectUUID:         projectUUID,
+		TodoUUID:            opts.TodoUUID,
+		AgentName:           agentName,
+		Status:              "running",
+		Title:               opts.Title,
+		ContextSnapshotJSON: "{}",
+		StartedAt:           &now,
+		LastHeartbeatAt:     &now,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+		ClientCreatedAt:     now,
+		ClientUpdatedAt:     now,
+	}
+	if err := s.store.SaveAITaskRun(run); err != nil {
+		return AICommandResult{}, err
+	}
+	if err := s.store.SetActiveRun(ActiveRunRecord{
+		ScopeKey:    scopeKey,
+		SessionID:   sessionID,
+		RunUUID:     run.UUID,
+		CWD:         cwd,
+		ProjectType: projectType,
+		ProjectUUID: projectUUID,
+		TodoUUID:    opts.TodoUUID,
+		AgentName:   agentName,
+		UpdatedAt:   now,
+	}); err != nil {
+		return AICommandResult{}, err
+	}
+
+	synced, detail := s.bestEffortSync(ctx)
+	return AICommandResult{Run: run, Synced: synced, SyncDetail: detail}, nil
+}
+
+func (s *Service) ResumeAITask(ctx context.Context, opts AIResumeOptions) (AICommandResult, bool, error) {
+	if s.client.CanSync() {
+		_, _ = s.SyncPending(ctx)
+	}
+	projectType, projectUUID, err := ParseProjectRef(opts.Project)
+	if err != nil {
+		return AICommandResult{}, false, err
+	}
+	agentName := defaultString(opts.AgentName, "codex")
+	sessionID := ResolveAISessionID(opts.SessionID)
+	cwd := currentWorkingDir()
+	scopeKey := ScopeKey(cwd, projectType, projectUUID, opts.TodoUUID, agentName)
+
+	if opts.NewRun {
+		started, err := s.StartAITask(ctx, AIStartOptions{
+			Project: opts.Project, TodoUUID: opts.TodoUUID, Title: opts.Title, AgentName: agentName,
+			SessionID: sessionID, SessionExplicit: true, NewRun: true,
+		})
+		return started, true, err
+	}
+
+	running, err := s.store.RunningRunsForScope(scopeKey)
+	if err != nil {
+		return AICommandResult{}, false, err
+	}
+	if !opts.SessionExplicit && len(running) > 1 {
+		return AICommandResult{}, false, fmt.Errorf("multiple running AI runs exist for this scope; pass --session <id> or --new")
+	}
+
+	active, found, err := s.store.ActiveRun(scopeKey, sessionID)
+	if err != nil {
+		return AICommandResult{}, false, err
+	}
+	if found {
+		run, err := s.store.GetAITaskRun(active.RunUUID)
+		if err == nil && isResumableStatus(run.Status) {
+			return AICommandResult{Run: run, Synced: run.SyncedAt != nil}, true, nil
+		}
+	}
+
+	if !opts.SessionExplicit && len(running) > 0 {
+		return AICommandResult{}, false, fmt.Errorf("running AI run exists for this scope in another session; pass --session <id> or --new")
+	}
+
+	run, ok, err := s.store.LatestRunningRun(projectType, projectUUID, opts.TodoUUID, agentName)
+	if err != nil {
+		return AICommandResult{}, false, err
+	}
+	if !ok {
+		return AICommandResult{}, false, nil
+	}
+	if err := s.store.SetActiveRun(ActiveRunRecord{
+		ScopeKey:    scopeKey,
+		SessionID:   sessionID,
+		RunUUID:     run.UUID,
+		CWD:         cwd,
+		ProjectType: projectType,
+		ProjectUUID: projectUUID,
+		TodoUUID:    opts.TodoUUID,
+		AgentName:   agentName,
+		UpdatedAt:   s.now().UTC(),
+	}); err != nil {
+		return AICommandResult{}, false, err
+	}
+	return AICommandResult{Run: run, Synced: run.SyncedAt != nil}, true, nil
+}
+
+func (s *Service) ProgressAITask(ctx context.Context, runUUID, phase, summary string) (AICommandResult, error) {
+	if strings.TrimSpace(runUUID) == "" {
+		return AICommandResult{}, fmt.Errorf("--run is required")
+	}
+	run, err := s.store.GetAITaskRun(runUUID)
+	if err != nil {
+		return AICommandResult{}, err
+	}
+	now := s.now().UTC()
+	run.Status = "running"
+	run.LatestPhase = phase
+	run.LatestSummary = summary
+	run.LastHeartbeatAt = &now
+	run.UpdatedAt = now
+	run.ClientUpdatedAt = now
+	run.SyncedAt = nil
+	run.LastSyncError = ""
+	if err := s.store.SaveAITaskRun(run); err != nil {
+		return AICommandResult{}, err
+	}
+	event, err := s.newAITaskEvent(run, AIEventOptions{
+		EventType: "progress",
+		Severity:  "info",
+		Title:     phase,
+		Content:   summary,
+	})
+	if err != nil {
+		return AICommandResult{}, err
+	}
+	if err := s.store.SaveAITaskEvent(event); err != nil {
+		return AICommandResult{}, err
+	}
+	synced, detail := s.bestEffortSync(ctx)
+	return AICommandResult{Run: run, Event: &event, Synced: synced, SyncDetail: detail}, nil
+}
+
+func (s *Service) HeartbeatAITask(ctx context.Context, runUUID, summary string) (AICommandResult, error) {
+	run, err := s.store.GetAITaskRun(runUUID)
+	if err != nil {
+		return AICommandResult{}, err
+	}
+	now := s.now().UTC()
+	if summary != "" {
+		run.LatestSummary = summary
+	}
+	run.LastHeartbeatAt = &now
+	run.UpdatedAt = now
+	run.ClientUpdatedAt = now
+	run.SyncedAt = nil
+	run.LastSyncError = ""
+	if err := s.store.SaveAITaskRun(run); err != nil {
+		return AICommandResult{}, err
+	}
+	synced, detail := s.bestEffortSync(ctx)
+	return AICommandResult{Run: run, Synced: synced, SyncDetail: detail}, nil
+}
+
+func (s *Service) AddAITaskEvent(ctx context.Context, opts AIEventOptions) (AICommandResult, error) {
+	run, err := s.store.GetAITaskRun(opts.RunUUID)
+	if err != nil {
+		return AICommandResult{}, err
+	}
+	event, err := s.newAITaskEvent(run, opts)
+	if err != nil {
+		return AICommandResult{}, err
+	}
+	if err := s.store.SaveAITaskEvent(event); err != nil {
+		return AICommandResult{}, err
+	}
+	synced, detail := s.bestEffortSync(ctx)
+	return AICommandResult{Run: run, Event: &event, Synced: synced, SyncDetail: detail}, nil
+}
+
+func (s *Service) BlockAITask(ctx context.Context, runUUID, question string) (AICommandResult, error) {
+	run, err := s.store.GetAITaskRun(runUUID)
+	if err != nil {
+		return AICommandResult{}, err
+	}
+	now := s.now().UTC()
+	run.Status = "blocked"
+	run.LatestSummary = question
+	run.LastHeartbeatAt = &now
+	run.UpdatedAt = now
+	run.ClientUpdatedAt = now
+	run.SyncedAt = nil
+	run.LastSyncError = ""
+	if err := s.store.SaveAITaskRun(run); err != nil {
+		return AICommandResult{}, err
+	}
+	event, err := s.newAITaskEvent(run, AIEventOptions{EventType: "blocker", Severity: "warning", Title: "Blocked", Content: question})
+	if err != nil {
+		return AICommandResult{}, err
+	}
+	if err := s.store.SaveAITaskEvent(event); err != nil {
+		return AICommandResult{}, err
+	}
+	synced, detail := s.bestEffortSync(ctx)
+	return AICommandResult{Run: run, Event: &event, Synced: synced, SyncDetail: detail}, nil
+}
+
+func (s *Service) CompleteAITask(ctx context.Context, runUUID, summary, artifact string) (AICommandResult, error) {
+	run, err := s.store.GetAITaskRun(runUUID)
+	if err != nil {
+		return AICommandResult{}, err
+	}
+	now := s.now().UTC()
+	run.Status = "completed"
+	run.LatestSummary = summary
+	run.LastHeartbeatAt = &now
+	run.CompletedAt = &now
+	run.UpdatedAt = now
+	run.ClientUpdatedAt = now
+	run.SyncedAt = nil
+	run.LastSyncError = ""
+	if err := s.store.SaveAITaskRun(run); err != nil {
+		return AICommandResult{}, err
+	}
+	metadata := "{}"
+	if strings.TrimSpace(artifact) != "" {
+		data, _ := json.Marshal(map[string]any{"artifact_paths": []string{artifact}})
+		metadata = string(data)
+	}
+	event, err := s.newAITaskEvent(run, AIEventOptions{
+		EventType: "final", Severity: "info", Title: "Completed", Content: summary, MetadataJSON: metadata,
+	})
+	if err != nil {
+		return AICommandResult{}, err
+	}
+	if err := s.store.SaveAITaskEvent(event); err != nil {
+		return AICommandResult{}, err
+	}
+	if err := s.store.ClearActiveRunByRunUUID(run.UUID); err != nil {
+		return AICommandResult{}, err
+	}
+	synced, detail := s.bestEffortSync(ctx)
+	return AICommandResult{Run: run, Event: &event, Synced: synced, SyncDetail: detail}, nil
+}
+
+func (s *Service) AITaskStatus(runUUID string) (AITaskRunRecord, error) {
+	return s.store.GetAITaskRun(runUUID)
+}
+
+func (s *Service) CurrentAITask(project, todoUUID, agentName, sessionID string) (AITaskRunRecord, bool, error) {
+	projectType, projectUUID, err := ParseProjectRef(project)
+	if err != nil {
+		return AITaskRunRecord{}, false, err
+	}
+	scopeKey := ScopeKey(currentWorkingDir(), projectType, projectUUID, todoUUID, defaultString(agentName, "codex"))
+	active, found, err := s.store.ActiveRun(scopeKey, ResolveAISessionID(sessionID))
+	if err != nil || !found {
+		return AITaskRunRecord{}, false, err
+	}
+	run, err := s.store.GetAITaskRun(active.RunUUID)
+	if err != nil {
+		return AITaskRunRecord{}, false, err
+	}
+	return run, true, nil
+}
+
+func (s *Service) newAITaskEvent(run AITaskRunRecord, opts AIEventOptions) (AITaskEventRecord, error) {
+	now := s.now().UTC()
+	eventType := defaultString(opts.EventType, "progress")
+	if !validAITaskEventType(eventType) {
+		return AITaskEventRecord{}, fmt.Errorf("invalid event type %q", eventType)
+	}
+	event := AITaskEventRecord{
+		UUID:               newUUID(),
+		RunUUID:            run.UUID,
+		TodoUUID:           run.TodoUUID,
+		EventType:          eventType,
+		Severity:           defaultString(opts.Severity, "info"),
+		Title:              opts.Title,
+		Content:            opts.Content,
+		MetadataJSON:       opts.MetadataJSON,
+		PayloadHashVersion: 1,
+		OccurredAt:         now,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		ClientCreatedAt:    now,
+		ClientUpdatedAt:    now,
+	}
+	hash, metadata, err := ComputeAITaskEventPayloadHash(event)
+	if err != nil {
+		return AITaskEventRecord{}, err
+	}
+	event.MetadataJSON = metadata
+	event.PayloadHash = hash
+	return event, nil
+}
+
+func (s *Service) bestEffortSync(ctx context.Context) (bool, string) {
+	if !s.client.CanSync() {
+		return false, "INTEGLIFE_API_TOKEN not set"
+	}
+	result, err := s.SyncPending(ctx)
+	if err != nil {
+		return false, err.Error()
+	}
+	if len(result.Failures) > 0 {
+		return false, result.Failures[0].Detail
+	}
+	return true, fmt.Sprintf("synced=%d pending=%d", result.Synced, result.Pending)
+}
+
+func (s *Service) applySyncAck(ack SyncAck) error {
+	for _, uuid := range ack.StatusLogUUIDs {
+		if err := s.store.MarkSynced(uuid, ack.ServerTime); err != nil {
+			return err
+		}
+	}
+	for _, uuid := range ack.AITaskRunSynced {
+		if err := s.store.MarkAITaskRunSynced(uuid, ack.ServerTime); err != nil {
+			return err
+		}
+	}
+	for _, uuid := range ack.AITaskRunConflicts {
+		if err := s.store.MarkAITaskRunSyncError(uuid, "conflict: server newer"); err != nil {
+			return err
+		}
+	}
+	for _, uuid := range ack.AITaskEventSynced {
+		if err := s.store.MarkAITaskEventSynced(uuid, ack.ServerTime); err != nil {
+			return err
+		}
+	}
+	for uuid, detail := range ack.AITaskEventErrors {
+		if err := s.store.MarkAITaskEventSyncError(uuid, detail); err != nil {
+			return err
+		}
+	}
+	if err := s.store.UpdateSyncCursors([]string{"ai_task_runs", "ai_task_events"}, ack.ServerTime); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) markBatchSyncError(batch SyncBatch, detail string) error {
+	for _, record := range batch.StatusLogs {
+		if err := s.store.MarkSyncError(record.UUID, detail); err != nil {
+			return err
+		}
+	}
+	for _, run := range batch.AITaskRuns {
+		if err := s.store.MarkAITaskRunSyncError(run.UUID, detail); err != nil {
+			return err
+		}
+	}
+	for _, event := range batch.AITaskEvents {
+		if err := s.store.MarkAITaskEventSyncError(event.UUID, detail); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func failuresForBatch(batch SyncBatch, detail string) []SyncFailure {
+	failures := []SyncFailure{}
+	for _, record := range batch.StatusLogs {
+		failures = append(failures, SyncFailure{UUID: record.UUID, Detail: detail})
+	}
+	for _, run := range batch.AITaskRuns {
+		failures = append(failures, SyncFailure{UUID: run.UUID, Detail: detail})
+	}
+	for _, event := range batch.AITaskEvents {
+		failures = append(failures, SyncFailure{UUID: event.UUID, Detail: detail})
+	}
+	return failures
 }
 
 func newUUID() string {
@@ -101,4 +542,73 @@ func newUUID() string {
 		hex.EncodeToString(buf[8:10]),
 		hex.EncodeToString(buf[10:16]),
 	)
+}
+
+func ParseProjectRef(ref string) (string, string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "adhoc", "", nil
+	}
+	kind, uuid, ok := strings.Cut(ref, ":")
+	if !ok {
+		return "", "", fmt.Errorf("--project must use type:uuid, for example goal:<uuid>")
+	}
+	switch kind {
+	case "goal", "todo_list", "todo", "adhoc":
+	default:
+		return "", "", fmt.Errorf("unsupported project type %q", kind)
+	}
+	if kind != "adhoc" && strings.TrimSpace(uuid) == "" {
+		return "", "", fmt.Errorf("--project %s requires a uuid", kind)
+	}
+	return kind, uuid, nil
+}
+
+func ResolveAISessionID(flagValue string) string {
+	if strings.TrimSpace(flagValue) != "" {
+		return strings.TrimSpace(flagValue)
+	}
+	if env := strings.TrimSpace(os.Getenv("LIFE_AI_SESSION_ID")); env != "" {
+		return env
+	}
+	return "default"
+}
+
+func ScopeKey(cwd, projectType, projectUUID, todoUUID, agentName string) string {
+	parts := []string{
+		filepath.Clean(cwd),
+		projectType,
+		projectUUID,
+		todoUUID,
+		agentName,
+	}
+	return strings.Join(parts, "\x1f")
+}
+
+func defaultString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
+}
+
+func currentWorkingDir() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
+}
+
+func isResumableStatus(status string) bool {
+	return status == "queued" || status == "running" || status == "blocked"
+}
+
+func validAITaskEventType(eventType string) bool {
+	switch eventType {
+	case "progress", "phase", "command", "artifact", "decision", "blocker", "error", "final":
+		return true
+	default:
+		return false
+	}
 }

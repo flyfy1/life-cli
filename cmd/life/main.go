@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -20,13 +22,13 @@ var Version = "dev"
 type Mood string
 
 const (
-	MoodHappy    Mood = "happy"
-	MoodSad      Mood = "sad"
-	MoodAnxious  Mood = "anxious"
-	MoodCalm     Mood = "calm"
-	MoodExcited  Mood = "excited"
-	MoodTired    Mood = "tired"
-	MoodFocused  Mood = "focused"
+	MoodHappy      Mood = "happy"
+	MoodSad        Mood = "sad"
+	MoodAnxious    Mood = "anxious"
+	MoodCalm       Mood = "calm"
+	MoodExcited    Mood = "excited"
+	MoodTired      Mood = "tired"
+	MoodFocused    Mood = "focused"
 	MoodFrustrated Mood = "frustrated"
 )
 
@@ -70,6 +72,9 @@ func run(ctx context.Context, args []string) error {
 
 	case "sync":
 		return cmdSync(ctx, service)
+
+	case "ai":
+		return cmdAI(ctx, service, args[1:])
 
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
@@ -133,6 +138,214 @@ func run(ctx context.Context, args []string) error {
 		fmt.Printf("sync skipped: %s\n", syncDetail)
 	}
 	return nil
+}
+
+func cmdAI(ctx context.Context, service *integlife.Service, args []string) error {
+	if len(args) == 0 {
+		printAIUsage(os.Stderr)
+		return errors.New("missing ai command")
+	}
+	switch args[0] {
+	case "start":
+		fs := flag.NewFlagSet("life ai start", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		project := fs.String("project", "", "project ref type:uuid")
+		todo := fs.String("todo", "", "todo uuid")
+		title := fs.String("title", "", "run title")
+		agent := fs.String("agent", "codex", "agent name")
+		session := fs.String("session", "", "session id")
+		jsonOut := fs.Bool("json", false, "print json")
+		newRun := fs.Bool("new", false, "force new run")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, err := service.StartAITask(ctx, integlife.AIStartOptions{
+			Project: *project, TodoUUID: *todo, Title: *title, AgentName: *agent,
+			SessionID: *session, SessionExplicit: flagProvided(fs, "session"), NewRun: *newRun,
+		})
+		if err != nil {
+			return err
+		}
+		printAICommandResult(result, *jsonOut)
+		return nil
+	case "resume":
+		fs := flag.NewFlagSet("life ai resume", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		project := fs.String("project", "", "project ref type:uuid")
+		todo := fs.String("todo", "", "todo uuid")
+		agent := fs.String("agent", "codex", "agent name")
+		session := fs.String("session", "", "session id")
+		title := fs.String("title", "", "title for --new")
+		jsonOut := fs.Bool("json", false, "print json")
+		newRun := fs.Bool("new", false, "create a new run")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, found, err := service.ResumeAITask(ctx, integlife.AIResumeOptions{
+			Project: *project, TodoUUID: *todo, AgentName: *agent, SessionID: *session,
+			SessionExplicit: flagProvided(fs, "session"), NewRun: *newRun, Title: *title,
+		})
+		if err != nil {
+			return err
+		}
+		if !found {
+			if *jsonOut {
+				printJSON(map[string]any{"ok": false, "error": "no resumable run"})
+			} else {
+				fmt.Println("no resumable AI run found")
+			}
+			return nil
+		}
+		printAICommandResult(result, *jsonOut)
+		return nil
+	case "progress":
+		fs := flag.NewFlagSet("life ai progress", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		run := fs.String("run", "", "run uuid")
+		phase := fs.String("phase", "", "phase")
+		summary := fs.String("summary", "", "summary")
+		jsonOut := fs.Bool("json", false, "print json")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, err := service.ProgressAITask(ctx, *run, *phase, *summary)
+		if err != nil {
+			return err
+		}
+		printAICommandResult(result, *jsonOut)
+		return nil
+	case "heartbeat":
+		fs := flag.NewFlagSet("life ai heartbeat", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		run := fs.String("run", "", "run uuid")
+		summary := fs.String("summary", "", "summary")
+		jsonOut := fs.Bool("json", false, "print json")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, err := service.HeartbeatAITask(ctx, *run, *summary)
+		if err != nil {
+			return err
+		}
+		printAICommandResult(result, *jsonOut)
+		return nil
+	case "event":
+		fs := flag.NewFlagSet("life ai event", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		run := fs.String("run", "", "run uuid")
+		eventType := fs.String("type", "progress", "event type")
+		severity := fs.String("severity", "info", "severity")
+		title := fs.String("title", "", "title")
+		content := fs.String("content", "", "content")
+		metadata := fs.String("metadata-json", "{}", "metadata json")
+		jsonOut := fs.Bool("json", false, "print json")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, err := service.AddAITaskEvent(ctx, integlife.AIEventOptions{
+			RunUUID: *run, EventType: *eventType, Severity: *severity, Title: *title,
+			Content: *content, MetadataJSON: *metadata,
+		})
+		if err != nil {
+			return err
+		}
+		printAICommandResult(result, *jsonOut)
+		return nil
+	case "block":
+		fs := flag.NewFlagSet("life ai block", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		run := fs.String("run", "", "run uuid")
+		question := fs.String("question", "", "question")
+		jsonOut := fs.Bool("json", false, "print json")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, err := service.BlockAITask(ctx, *run, *question)
+		if err != nil {
+			return err
+		}
+		printAICommandResult(result, *jsonOut)
+		return nil
+	case "complete":
+		fs := flag.NewFlagSet("life ai complete", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		run := fs.String("run", "", "run uuid")
+		summary := fs.String("summary", "", "summary")
+		artifact := fs.String("artifact", "", "artifact path")
+		jsonOut := fs.Bool("json", false, "print json")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, err := service.CompleteAITask(ctx, *run, *summary, *artifact)
+		if err != nil {
+			return err
+		}
+		printAICommandResult(result, *jsonOut)
+		return nil
+	case "status":
+		fs := flag.NewFlagSet("life ai status", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		run := fs.String("run", "", "run uuid")
+		current := fs.Bool("current", false, "show current active run")
+		project := fs.String("project", "", "project ref type:uuid")
+		todo := fs.String("todo", "", "todo uuid")
+		agent := fs.String("agent", "codex", "agent name")
+		session := fs.String("session", "", "session id")
+		jsonOut := fs.Bool("json", false, "print json")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var record integlife.AITaskRunRecord
+		var found bool
+		var err error
+		if *current {
+			record, found, err = service.CurrentAITask(*project, *todo, *agent, *session)
+			if err != nil {
+				return err
+			}
+			if !found {
+				if *jsonOut {
+					printJSON(map[string]any{"ok": false, "error": "no current run"})
+				} else {
+					fmt.Println("no current AI run")
+				}
+				return nil
+			}
+		} else {
+			if strings.TrimSpace(*run) == "" {
+				return errors.New("--run is required unless --current is used")
+			}
+			record, err = service.AITaskStatus(*run)
+			if err != nil {
+				return err
+			}
+		}
+		printAIRunStatus(record, *jsonOut)
+		return nil
+	case "resolve":
+		fs := flag.NewFlagSet("life ai resolve", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		run := fs.String("run", "", "run uuid")
+		preferLocal := fs.Bool("prefer-local", false, "prefer local state")
+		newRun := fs.Bool("new-run", false, "create successor run")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*run) == "" {
+			return errors.New("--run is required")
+		}
+		if !*preferLocal && !*newRun {
+			return errors.New("resolve is minimal in this release; pass --prefer-local or --new-run to choose an explicit strategy")
+		}
+		fmt.Printf("resolve pending for run %s: sync conflict handling is minimal in this CLI build; inspect `life ai status --run %s` before retrying sync\n", *run, *run)
+		return nil
+	case "help", "-h", "--help":
+		printAIUsage(os.Stdout)
+		return nil
+	default:
+		printAIUsage(os.Stderr)
+		return fmt.Errorf("unknown ai command %q", args[0])
+	}
 }
 
 // extractMood removes --mood <value> or --mood=<value> from args and returns the mood.
@@ -222,6 +435,83 @@ func cmdSync(ctx context.Context, service *integlife.Service) error {
 	return nil
 }
 
+func printAICommandResult(result integlife.AICommandResult, jsonOut bool) {
+	if jsonOut {
+		out := map[string]any{
+			"ok":          true,
+			"run_uuid":    result.Run.UUID,
+			"status":      result.Run.Status,
+			"synced":      result.Synced,
+			"sync_detail": result.SyncDetail,
+		}
+		if result.Event != nil {
+			out["event_uuid"] = result.Event.UUID
+			out["event_type"] = result.Event.EventType
+		}
+		printJSON(out)
+		return
+	}
+	fmt.Printf("ai run: uuid=%s status=%s\n", result.Run.UUID, result.Run.Status)
+	if result.Event != nil {
+		fmt.Printf("ai event: uuid=%s type=%s\n", result.Event.UUID, result.Event.EventType)
+	}
+	if result.Synced {
+		fmt.Printf("sync ok: %s\n", result.SyncDetail)
+	} else if result.SyncDetail != "" {
+		fmt.Printf("sync skipped: %s\n", result.SyncDetail)
+	}
+}
+
+func printAIRunStatus(run integlife.AITaskRunRecord, jsonOut bool) {
+	if jsonOut {
+		printJSON(map[string]any{
+			"ok":                true,
+			"run_uuid":          run.UUID,
+			"status":            run.Status,
+			"title":             run.Title,
+			"latest_phase":      run.LatestPhase,
+			"latest_summary":    run.LatestSummary,
+			"last_sync_error":   run.LastSyncError,
+			"client_updated_at": run.ClientUpdatedAt.Format(time.RFC3339Nano),
+		})
+		return
+	}
+	fmt.Printf("run: %s\n", run.UUID)
+	fmt.Printf("status: %s\n", run.Status)
+	if run.Title != "" {
+		fmt.Printf("title: %s\n", run.Title)
+	}
+	if run.LatestPhase != "" {
+		fmt.Printf("phase: %s\n", run.LatestPhase)
+	}
+	if run.LatestSummary != "" {
+		fmt.Printf("summary: %s\n", run.LatestSummary)
+	}
+	if run.LastSyncError != "" {
+		fmt.Printf("sync conflict/error: %s\n", run.LastSyncError)
+		fmt.Printf("try: life ai resolve --run %s --prefer-local\n", run.UUID)
+	}
+}
+
+func printJSON(value any) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		fmt.Printf(`{"ok":false,"error":"%s"}`+"\n", err.Error())
+		return
+	}
+	fmt.Println(string(data))
+}
+
+func flagProvided(fs *flag.FlagSet, name string) bool {
+	provided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			provided = true
+		}
+	})
+	return provided
+}
+
 func printUsage(out *os.File) {
 	moods := make([]string, len(validMoods))
 	for i, m := range validMoods {
@@ -235,6 +525,7 @@ func printUsage(out *os.File) {
   life login                            authenticate and save token
   life logout                           remove saved token
   life sync                             push pending entries to the server
+  life ai <command>                     report AI task progress
 
 moods: %s
 
@@ -244,4 +535,19 @@ examples:
   life --mood happy 'shipped the feature!'
   life work --mood focused 'deep work session'
 `, strings.Join(moods, ", "))
+}
+
+func printAIUsage(out *os.File) {
+	fmt.Fprint(out, `usage:
+  life ai start --project goal:<uuid> --todo <uuid> --title <text> --agent codex --json
+  life ai progress --run <uuid> --phase <phase> --summary <text>
+  life ai heartbeat --run <uuid> --summary <text>
+  life ai event --run <uuid> --type artifact --title <title> --content <text> --metadata-json '{}'
+  life ai block --run <uuid> --question <text>
+  life ai complete --run <uuid> --summary <text> --artifact <path>
+  life ai status --run <uuid>
+  life ai status --current --project goal:<uuid> --todo <uuid>
+  life ai resume --project goal:<uuid> --todo <uuid> --agent codex --json
+  life ai resolve --run <uuid> --prefer-local
+`)
 }
