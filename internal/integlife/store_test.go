@@ -163,6 +163,74 @@ func TestTodoListAndTodoLocalWrites(t *testing.T) {
 	}
 }
 
+func TestTodoListFollowsParentLocally(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "integlife.db"))
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	service := NewService(store, NewClient("", "", time.Second))
+	now := time.Date(2026, 6, 2, 11, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	oldList, err := service.AddTodoList(testContext(), "Old", "", "", 0)
+	if err != nil {
+		t.Fatalf("AddTodoList(old) error = %v", err)
+	}
+	newList, err := service.AddTodoList(testContext(), "New", "", "", 1)
+	if err != nil {
+		t.Fatalf("AddTodoList(new) error = %v", err)
+	}
+
+	parent := TodoRecord{
+		UUID: "parent-todo", Content: "parent", ListUUID: oldList.List.UUID,
+		CompletionMode: "manual", CompletionSource: "manual", AIEvaluationStatus: "not_requested",
+		CreatedAt: now, UpdatedAt: now, ClientCreatedAt: now, ClientUpdatedAt: now,
+	}
+	child := TodoRecord{
+		UUID: "child-todo", ParentUUID: parent.UUID, Content: "child", ListUUID: oldList.List.UUID,
+		CompletionMode: "manual", CompletionSource: "manual", AIEvaluationStatus: "not_requested",
+		CreatedAt: now, UpdatedAt: now, ClientCreatedAt: now, ClientUpdatedAt: now,
+	}
+	if err := store.SaveTodo(parent); err != nil {
+		t.Fatalf("SaveTodo(parent) error = %v", err)
+	}
+	if err := store.SaveTodo(child); err != nil {
+		t.Fatalf("SaveTodo(child) error = %v", err)
+	}
+
+	now = now.Add(time.Minute)
+	if _, err := service.UpdateTodo(testContext(), parent.UUID, func(todo *TodoRecord) error {
+		todo.ListUUID = newList.List.UUID
+		return nil
+	}); err != nil {
+		t.Fatalf("UpdateTodo(parent) error = %v", err)
+	}
+	updatedChild, err := store.Todo(child.UUID)
+	if err != nil {
+		t.Fatalf("Todo(child) error = %v", err)
+	}
+	if updatedChild.ListUUID != newList.List.UUID {
+		t.Fatalf("child list uuid = %s, want %s", updatedChild.ListUUID, newList.List.UUID)
+	}
+
+	now = now.Add(time.Minute)
+	if _, err := service.UpdateTodo(testContext(), child.UUID, func(todo *TodoRecord) error {
+		todo.ListUUID = oldList.List.UUID
+		return nil
+	}); err != nil {
+		t.Fatalf("UpdateTodo(child) error = %v", err)
+	}
+	updatedChild, err = store.Todo(child.UUID)
+	if err != nil {
+		t.Fatalf("Todo(child after override) error = %v", err)
+	}
+	if updatedChild.ListUUID != newList.List.UUID {
+		t.Fatalf("child override list uuid = %s, want parent list %s", updatedChild.ListUUID, newList.List.UUID)
+	}
+}
+
 func TestAITaskLocalWritesStartProgressHeartbeat(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "integlife.db"))
 	if err != nil {

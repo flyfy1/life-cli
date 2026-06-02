@@ -330,6 +330,29 @@ func (s *Store) ListTodos(includeDeleted bool, completedFilter *bool, listUUID s
 	return todos, nil
 }
 
+func (s *Store) ChildTodos(parentUUID string) ([]TodoRecord, error) {
+	rows, err := s.db.Query(todoSelectSQL()+`
+		WHERE deleted_at IS NULL AND parent_uuid = ?
+		ORDER BY completed ASC, sort_order ASC, client_created_at ASC
+	`, parentUUID)
+	if err != nil {
+		return nil, fmt.Errorf("query child todos: %w", err)
+	}
+	defer rows.Close()
+	var todos []TodoRecord
+	for rows.Next() {
+		todo, err := scanTodo(rows)
+		if err != nil {
+			return nil, err
+		}
+		todos = append(todos, todo)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate child todos: %w", err)
+	}
+	return todos, nil
+}
+
 func (s *Store) PendingTodos() ([]TodoRecord, error) {
 	rows, err := s.db.Query(todoSelectSQL() + `
 		WHERE synced_at IS NULL

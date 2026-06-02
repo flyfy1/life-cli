@@ -3,8 +3,10 @@ package integlife
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -101,6 +103,9 @@ func (s *Service) AddTodo(ctx context.Context, content, notes, listRef string, o
 	if err := s.store.SaveTodo(todo); err != nil {
 		return TodoCommandResult{}, err
 	}
+	if err := s.cascadeTodoListToChildren(todo); err != nil {
+		return TodoCommandResult{}, err
+	}
 	synced, detail := s.bestEffortSync(ctx)
 	return TodoCommandResult{Todo: todo, Synced: synced, SyncDetail: detail}, nil
 }
@@ -115,12 +120,18 @@ func (s *Service) UpdateTodo(ctx context.Context, ref string, mutate func(*TodoR
 			return TodoCommandResult{}, err
 		}
 	}
+	if err := s.inheritParentTodoList(&todo); err != nil {
+		return TodoCommandResult{}, err
+	}
 	now := s.now().UTC()
 	todo.UpdatedAt = now
 	todo.ClientUpdatedAt = now
 	todo.SyncedAt = nil
 	todo.LastSyncError = ""
 	if err := s.store.SaveTodo(todo); err != nil {
+		return TodoCommandResult{}, err
+	}
+	if err := s.cascadeTodoListToChildren(todo); err != nil {
 		return TodoCommandResult{}, err
 	}
 	synced, detail := s.bestEffortSync(ctx)
@@ -235,6 +246,45 @@ func (s *Service) resolveOptionalListUUID(ref string) (string, error) {
 		return "", fmt.Errorf("resolve list: %w", err)
 	}
 	return list.UUID, nil
+}
+
+func (s *Service) inheritParentTodoList(todo *TodoRecord) error {
+	if strings.TrimSpace(todo.ParentUUID) == "" {
+		return nil
+	}
+	parent, err := s.store.Todo(todo.ParentUUID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	todo.ListUUID = parent.ListUUID
+	return nil
+}
+
+func (s *Service) cascadeTodoListToChildren(parent TodoRecord) error {
+	children, err := s.store.ChildTodos(parent.UUID)
+	if err != nil {
+		return err
+	}
+	now := s.now().UTC()
+	for _, child := range children {
+		if child.ListUUID != parent.ListUUID {
+			child.ListUUID = parent.ListUUID
+			child.UpdatedAt = now
+			child.ClientUpdatedAt = now
+			child.SyncedAt = nil
+			child.LastSyncError = ""
+			if err := s.store.SaveTodo(child); err != nil {
+				return err
+			}
+		}
+		if err := s.cascadeTodoListToChildren(child); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) LogAndMaybeSync(ctx context.Context, logType, content string) (Record, bool, string, error) {
