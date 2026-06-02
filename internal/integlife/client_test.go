@@ -47,6 +47,15 @@ func TestBuildSyncBatchPayloadIncludesAIModelsAndCursors(t *testing.T) {
 	cursor := now.Add(-time.Hour)
 	payload := buildSyncBatchPayload(SyncBatch{
 		StatusLogs: []Record{{UUID: "status-1", LogType: "ai", Content: "hello", LoggedAt: now, CreatedAt: now, UpdatedAt: now}},
+		TodoLists: []TodoListRecord{{
+			UUID: "list-1", Name: "Work", Color: "blue", Icon: "briefcase", SortOrder: 1,
+			CreatedAt: now, UpdatedAt: now, ClientCreatedAt: now, ClientUpdatedAt: now,
+		}},
+		Todos: []TodoRecord{{
+			UUID: "todo-1", Content: "Write release notes", Notes: "ship before deploy", ListUUID: "list-1",
+			CompletionMode: "manual", CompletionSource: "manual", AIEvaluationStatus: "not_requested",
+			CreatedAt: now, UpdatedAt: now, ClientCreatedAt: now, ClientUpdatedAt: now,
+		}},
 		AITaskRuns: []AITaskRunRecord{{
 			UUID: "run-1", ProjectType: "goal", ProjectUUID: "goal-1", TodoUUID: "todo-1",
 			AgentName: "codex", Status: "running", CreatedAt: now, UpdatedAt: now, ClientCreatedAt: now, ClientUpdatedAt: now,
@@ -56,21 +65,27 @@ func TestBuildSyncBatchPayloadIncludesAIModelsAndCursors(t *testing.T) {
 			MetadataJSON: "{}", PayloadHashVersion: 1, PayloadHash: "hash", OccurredAt: now, CreatedAt: now, UpdatedAt: now,
 			ClientCreatedAt: now, ClientUpdatedAt: now,
 		}},
-		Cursors: map[string]time.Time{"ai_task_runs": cursor, "ai_task_events": cursor},
+		Cursors: map[string]time.Time{"todo_lists": cursor, "todos": cursor, "ai_task_runs": cursor, "ai_task_events": cursor},
 	})
 
-	wantModels := []string{"status_logs", "ai_task_runs", "ai_task_events"}
+	wantModels := []string{"status_logs", "todo_lists", "todos", "ai_task_runs", "ai_task_events"}
 	if !reflect.DeepEqual(payload.SyncModels, wantModels) {
 		t.Fatalf("SyncModels = %v, want %v", payload.SyncModels, wantModels)
 	}
 	if payload.LastSyncAtByModel["status_logs"] != nil {
 		t.Fatalf("status_logs cursor = %v, want nil", payload.LastSyncAtByModel["status_logs"])
 	}
-	for _, model := range []string{"ai_task_runs", "ai_task_events"} {
+	for _, model := range []string{"todo_lists", "todos", "ai_task_runs", "ai_task_events"} {
 		got := payload.LastSyncAtByModel[model]
 		if got == nil || *got != cursor.Format(time.RFC3339Nano) {
 			t.Fatalf("%s cursor = %v, want %s", model, got, cursor.Format(time.RFC3339Nano))
 		}
+	}
+	if len(payload.TodoLists) != 1 || len(payload.Todos) != 1 {
+		t.Fatalf("todo payload counts = lists %d todos %d, want 1/1", len(payload.TodoLists), len(payload.Todos))
+	}
+	if payload.Todos[0].ListUUID == nil || *payload.Todos[0].ListUUID != "list-1" {
+		t.Fatalf("todo list uuid = %v, want list-1", payload.Todos[0].ListUUID)
 	}
 	if len(payload.AITaskRuns) != 1 || len(payload.AITaskEvents) != 1 {
 		t.Fatalf("AI payload counts = runs %d events %d, want 1/1", len(payload.AITaskRuns), len(payload.AITaskEvents))
@@ -156,6 +171,70 @@ func TestSyncResponseAckHandling(t *testing.T) {
 	}
 	if len(pendingEvents) != 1 || pendingEvents[0].UUID != "event-rejected" || pendingEvents[0].LastSyncError != "hash_mismatch" {
 		t.Fatalf("pending events = %#v, want rejected hash_mismatch only", pendingEvents)
+	}
+}
+
+func TestSyncPendingPullsTodosWhenNoLocalPending(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "integlife.db"))
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 2, 10, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload syncPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request payload error = %v", err)
+		}
+		if payload.LastSyncAtByModel["todo_lists"] != nil || payload.LastSyncAtByModel["todos"] != nil {
+			t.Fatalf("todo cursors = %v/%v, want nil first-sync cursors", payload.LastSyncAtByModel["todo_lists"], payload.LastSyncAtByModel["todos"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"server_time":"` + now.Format(time.RFC3339Nano) + `",
+			"todo_lists_only_on_server":[{
+				"uuid":"list-1",
+				"name":"Work",
+				"color":"blue",
+				"icon":"briefcase",
+				"sort_order":1,
+				"created_at":"` + now.Format(time.RFC3339Nano) + `",
+				"updated_at":"` + now.Format(time.RFC3339Nano) + `"
+			}],
+			"todos_only_on_server":[{
+				"uuid":"todo-1",
+				"parent_uuid":"",
+				"content":"Write release notes",
+				"notes":"",
+				"completed":false,
+				"order":1,
+				"list_uuid":"list-1",
+				"created_at":"` + now.Format(time.RFC3339Nano) + `",
+				"updated_at":"` + now.Format(time.RFC3339Nano) + `"
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	service := NewService(store, NewClient(server.URL, "token", time.Second))
+	result, err := service.SyncPending(testContext())
+	if err != nil {
+		t.Fatalf("SyncPending() error = %v", err)
+	}
+	if result.Pending != 0 || result.Synced != 2 {
+		t.Fatalf("sync result = synced %d pending %d, want 2/0", result.Synced, result.Pending)
+	}
+	lists, err := store.ListTodoLists(false)
+	if err != nil {
+		t.Fatalf("ListTodoLists() error = %v", err)
+	}
+	todos, err := store.ListTodos(false, nil, "")
+	if err != nil {
+		t.Fatalf("ListTodos() error = %v", err)
+	}
+	if len(lists) != 1 || len(todos) != 1 {
+		t.Fatalf("pulled counts = lists %d todos %d, want 1/1", len(lists), len(todos))
 	}
 }
 

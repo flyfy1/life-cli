@@ -95,10 +95,10 @@ func TestStoreMigratesOldStatusLogsSchema(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read user_version error = %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("user_version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("user_version = %d, want 3", version)
 	}
-	for _, table := range []string{"ai_task_runs", "ai_task_events", "active_ai_runs", "sync_cursors"} {
+	for _, table := range []string{"todo_lists", "todos", "ai_task_runs", "ai_task_events", "active_ai_runs", "sync_cursors"} {
 		var name string
 		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name); err != nil {
 			t.Fatalf("missing table %s: %v", table, err)
@@ -110,6 +110,56 @@ func TestStoreMigratesOldStatusLogsSchema(t *testing.T) {
 	}
 	if !has {
 		t.Fatalf("status_logs.last_sync_error missing after migration")
+	}
+}
+
+func TestTodoListAndTodoLocalWrites(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "integlife.db"))
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	service := NewService(store, NewClient("", "", time.Second))
+	now := time.Date(2026, 6, 2, 9, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	listResult, err := service.AddTodoList(testContext(), "Work", "blue", "briefcase", 10)
+	if err != nil {
+		t.Fatalf("AddTodoList() error = %v", err)
+	}
+	if listResult.List.SyncedAt != nil {
+		t.Fatalf("new list SyncedAt = %v, want nil", listResult.List.SyncedAt)
+	}
+
+	now = now.Add(time.Minute)
+	todoResult, err := service.AddTodo(testContext(), "Write release notes", "ship before deploy", "Work", 20)
+	if err != nil {
+		t.Fatalf("AddTodo() error = %v", err)
+	}
+	if todoResult.Todo.ListUUID != listResult.List.UUID {
+		t.Fatalf("todo list uuid = %s, want %s", todoResult.Todo.ListUUID, listResult.List.UUID)
+	}
+
+	pendingLists, err := store.PendingTodoLists()
+	if err != nil {
+		t.Fatalf("PendingTodoLists() error = %v", err)
+	}
+	pendingTodos, err := store.PendingTodos()
+	if err != nil {
+		t.Fatalf("PendingTodos() error = %v", err)
+	}
+	if len(pendingLists) != 1 || len(pendingTodos) != 1 {
+		t.Fatalf("pending counts = lists %d todos %d, want 1/1", len(pendingLists), len(pendingTodos))
+	}
+
+	now = now.Add(time.Minute)
+	done, err := service.CompleteTodo(testContext(), todoResult.Todo.UUID[:8], true)
+	if err != nil {
+		t.Fatalf("CompleteTodo() error = %v", err)
+	}
+	if !done.Todo.Completed || done.Todo.CompletedAt == nil {
+		t.Fatalf("completed todo = %v completed_at=%v, want completed with timestamp", done.Todo.Completed, done.Todo.CompletedAt)
 	}
 }
 

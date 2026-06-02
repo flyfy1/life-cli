@@ -81,10 +81,13 @@ func migrateSchema(tx *sql.Tx) error {
 		if err := createAISchema(tx); err != nil {
 			return err
 		}
+		if err := createTodoSchema(tx); err != nil {
+			return err
+		}
 		if err := initSyncCursors(tx, time.Now().UTC()); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`PRAGMA user_version = 2`); err != nil {
+		if _, err := tx.Exec(`PRAGMA user_version = 3`); err != nil {
 			return fmt.Errorf("set schema version: %w", err)
 		}
 		return nil
@@ -93,8 +96,16 @@ func migrateSchema(tx *sql.Tx) error {
 	if err := createAISchema(tx); err != nil {
 		return err
 	}
+	if err := createTodoSchema(tx); err != nil {
+		return err
+	}
 	if err := initSyncCursors(tx, time.Now().UTC()); err != nil {
 		return err
+	}
+	if version < 3 {
+		if _, err := tx.Exec(`PRAGMA user_version = 3`); err != nil {
+			return fmt.Errorf("set schema version: %w", err)
+		}
 	}
 	return nil
 }
@@ -177,16 +188,314 @@ func (s *Store) PendingSyncBatch() (SyncBatch, error) {
 	if err != nil {
 		return SyncBatch{}, err
 	}
+	todoLists, err := s.PendingTodoLists()
+	if err != nil {
+		return SyncBatch{}, err
+	}
+	todos, err := s.PendingTodos()
+	if err != nil {
+		return SyncBatch{}, err
+	}
 	cursors, err := s.SyncCursors()
 	if err != nil {
 		return SyncBatch{}, err
 	}
 	return SyncBatch{
 		StatusLogs:   statusLogs,
+		TodoLists:    todoLists,
+		Todos:        todos,
 		AITaskRuns:   runs,
 		AITaskEvents: events,
 		Cursors:      cursors,
 	}, nil
+}
+
+func (s *Store) SaveTodo(todo TodoRecord) error {
+	_, err := s.db.Exec(`
+		INSERT INTO todos (
+			uuid, parent_uuid, content, notes, completed, sort_order, list_uuid,
+			completed_at, deleted_at, archived_at, deadline, goal_uuid, milestone_uuid,
+			category_uuid, task_role, todo_source, completion_mode, completion_source,
+			ai_evaluation_status, ai_completion_summary, created_at, updated_at,
+			client_created_at, client_updated_at, synced_at, last_sync_error
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(uuid) DO UPDATE SET
+			parent_uuid = excluded.parent_uuid,
+			content = excluded.content,
+			notes = excluded.notes,
+			completed = excluded.completed,
+			sort_order = excluded.sort_order,
+			list_uuid = excluded.list_uuid,
+			completed_at = excluded.completed_at,
+			deleted_at = excluded.deleted_at,
+			archived_at = excluded.archived_at,
+			deadline = excluded.deadline,
+			goal_uuid = excluded.goal_uuid,
+			milestone_uuid = excluded.milestone_uuid,
+			category_uuid = excluded.category_uuid,
+			task_role = excluded.task_role,
+			todo_source = excluded.todo_source,
+			completion_mode = excluded.completion_mode,
+			completion_source = excluded.completion_source,
+			ai_evaluation_status = excluded.ai_evaluation_status,
+			ai_completion_summary = excluded.ai_completion_summary,
+			updated_at = excluded.updated_at,
+			client_updated_at = excluded.client_updated_at,
+			synced_at = excluded.synced_at,
+			last_sync_error = excluded.last_sync_error
+	`, todo.UUID, todo.ParentUUID, todo.Content, todo.Notes, todo.Completed, todo.SortOrder, todo.ListUUID,
+		formatNullTime(todo.CompletedAt), formatNullTime(todo.DeletedAt), formatNullTime(todo.ArchivedAt), formatNullTime(todo.Deadline),
+		todo.GoalUUID, todo.MilestoneUUID, todo.CategoryUUID, todo.TaskRole, todo.TodoSource,
+		defaultString(todo.CompletionMode, "manual"), defaultString(todo.CompletionSource, "manual"),
+		defaultString(todo.AIEvaluationStatus, "not_requested"), todo.AICompletionSummary,
+		formatTime(todo.CreatedAt), formatTime(todo.UpdatedAt), formatTime(todo.ClientCreatedAt), formatTime(todo.ClientUpdatedAt),
+		formatNullTime(todo.SyncedAt), todo.LastSyncError)
+	if err != nil {
+		return fmt.Errorf("save todo: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) Todo(uuid string) (TodoRecord, error) {
+	row := s.db.QueryRow(todoSelectSQL()+` WHERE uuid = ?`, uuid)
+	return scanTodo(row)
+}
+
+func (s *Store) ResolveTodo(ref string) (TodoRecord, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return TodoRecord{}, fmt.Errorf("todo ref must be non-empty")
+	}
+	rows, err := s.db.Query(todoSelectSQL()+`
+		WHERE deleted_at IS NULL AND (uuid = ? OR uuid LIKE ?)
+		ORDER BY CASE WHEN uuid = ? THEN 0 ELSE 1 END, client_updated_at DESC
+		LIMIT 2
+	`, ref, ref+"%", ref)
+	if err != nil {
+		return TodoRecord{}, fmt.Errorf("resolve todo: %w", err)
+	}
+	defer rows.Close()
+	var matches []TodoRecord
+	for rows.Next() {
+		todo, err := scanTodo(rows)
+		if err != nil {
+			return TodoRecord{}, err
+		}
+		matches = append(matches, todo)
+	}
+	if err := rows.Err(); err != nil {
+		return TodoRecord{}, fmt.Errorf("iterate todo matches: %w", err)
+	}
+	if len(matches) == 0 {
+		return TodoRecord{}, sql.ErrNoRows
+	}
+	if len(matches) > 1 && matches[0].UUID != ref {
+		return TodoRecord{}, fmt.Errorf("todo ref %q is ambiguous", ref)
+	}
+	return matches[0], nil
+}
+
+func (s *Store) ListTodos(includeDeleted bool, completedFilter *bool, listUUID string) ([]TodoRecord, error) {
+	query := todoSelectSQL() + ` WHERE 1=1`
+	args := []any{}
+	if !includeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+	if completedFilter != nil {
+		query += ` AND completed = ?`
+		args = append(args, *completedFilter)
+	}
+	if listUUID != "" {
+		query += ` AND list_uuid = ?`
+		args = append(args, listUUID)
+	}
+	query += ` ORDER BY completed ASC, sort_order ASC, client_created_at ASC`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list todos: %w", err)
+	}
+	defer rows.Close()
+	var todos []TodoRecord
+	for rows.Next() {
+		todo, err := scanTodo(rows)
+		if err != nil {
+			return nil, err
+		}
+		todos = append(todos, todo)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate todos: %w", err)
+	}
+	return todos, nil
+}
+
+func (s *Store) PendingTodos() ([]TodoRecord, error) {
+	rows, err := s.db.Query(todoSelectSQL() + `
+		WHERE synced_at IS NULL
+		ORDER BY client_updated_at ASC, client_created_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query pending todos: %w", err)
+	}
+	defer rows.Close()
+	var todos []TodoRecord
+	for rows.Next() {
+		todo, err := scanTodo(rows)
+		if err != nil {
+			return nil, err
+		}
+		todos = append(todos, todo)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending todos: %w", err)
+	}
+	return todos, nil
+}
+
+func (s *Store) MarkTodoSynced(uuid string, syncedAt time.Time) error {
+	_, err := s.db.Exec(`UPDATE todos SET synced_at = ?, last_sync_error = '' WHERE uuid = ?`, formatTime(syncedAt), uuid)
+	if err != nil {
+		return fmt.Errorf("mark todo synced: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) MarkTodoSyncError(uuid, detail string) error {
+	_, err := s.db.Exec(`UPDATE todos SET last_sync_error = ? WHERE uuid = ?`, detail, uuid)
+	if err != nil {
+		return fmt.Errorf("mark todo sync error: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) SaveTodoList(list TodoListRecord) error {
+	_, err := s.db.Exec(`
+		INSERT INTO todo_lists (
+			uuid, name, color, icon, sort_order, deleted_at, created_at, updated_at,
+			client_created_at, client_updated_at, synced_at, last_sync_error
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(uuid) DO UPDATE SET
+			name = excluded.name,
+			color = excluded.color,
+			icon = excluded.icon,
+			sort_order = excluded.sort_order,
+			deleted_at = excluded.deleted_at,
+			updated_at = excluded.updated_at,
+			client_updated_at = excluded.client_updated_at,
+			synced_at = excluded.synced_at,
+			last_sync_error = excluded.last_sync_error
+	`, list.UUID, list.Name, list.Color, list.Icon, list.SortOrder, formatNullTime(list.DeletedAt),
+		formatTime(list.CreatedAt), formatTime(list.UpdatedAt), formatTime(list.ClientCreatedAt), formatTime(list.ClientUpdatedAt),
+		formatNullTime(list.SyncedAt), list.LastSyncError)
+	if err != nil {
+		return fmt.Errorf("save todo list: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ResolveTodoList(ref string) (TodoListRecord, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return TodoListRecord{}, fmt.Errorf("list ref must be non-empty")
+	}
+	rows, err := s.db.Query(todoListSelectSQL()+`
+		WHERE deleted_at IS NULL AND (uuid = ? OR uuid LIKE ? OR name = ?)
+		ORDER BY CASE WHEN uuid = ? THEN 0 WHEN name = ? THEN 1 ELSE 2 END, client_updated_at DESC
+		LIMIT 2
+	`, ref, ref+"%", ref, ref, ref)
+	if err != nil {
+		return TodoListRecord{}, fmt.Errorf("resolve todo list: %w", err)
+	}
+	defer rows.Close()
+	var matches []TodoListRecord
+	for rows.Next() {
+		list, err := scanTodoList(rows)
+		if err != nil {
+			return TodoListRecord{}, err
+		}
+		matches = append(matches, list)
+	}
+	if err := rows.Err(); err != nil {
+		return TodoListRecord{}, fmt.Errorf("iterate todo list matches: %w", err)
+	}
+	if len(matches) == 0 {
+		return TodoListRecord{}, sql.ErrNoRows
+	}
+	if len(matches) > 1 && matches[0].UUID != ref && matches[0].Name != ref {
+		return TodoListRecord{}, fmt.Errorf("list ref %q is ambiguous", ref)
+	}
+	return matches[0], nil
+}
+
+func (s *Store) TodoList(uuid string) (TodoListRecord, error) {
+	row := s.db.QueryRow(todoListSelectSQL()+` WHERE uuid = ?`, uuid)
+	return scanTodoList(row)
+}
+
+func (s *Store) ListTodoLists(includeDeleted bool) ([]TodoListRecord, error) {
+	query := todoListSelectSQL() + ` WHERE 1=1`
+	if !includeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+	query += ` ORDER BY sort_order ASC, client_created_at ASC`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("list todo lists: %w", err)
+	}
+	defer rows.Close()
+	var lists []TodoListRecord
+	for rows.Next() {
+		list, err := scanTodoList(rows)
+		if err != nil {
+			return nil, err
+		}
+		lists = append(lists, list)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate todo lists: %w", err)
+	}
+	return lists, nil
+}
+
+func (s *Store) PendingTodoLists() ([]TodoListRecord, error) {
+	rows, err := s.db.Query(todoListSelectSQL() + `
+		WHERE synced_at IS NULL
+		ORDER BY client_updated_at ASC, client_created_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query pending todo lists: %w", err)
+	}
+	defer rows.Close()
+	var lists []TodoListRecord
+	for rows.Next() {
+		list, err := scanTodoList(rows)
+		if err != nil {
+			return nil, err
+		}
+		lists = append(lists, list)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending todo lists: %w", err)
+	}
+	return lists, nil
+}
+
+func (s *Store) MarkTodoListSynced(uuid string, syncedAt time.Time) error {
+	_, err := s.db.Exec(`UPDATE todo_lists SET synced_at = ?, last_sync_error = '' WHERE uuid = ?`, formatTime(syncedAt), uuid)
+	if err != nil {
+		return fmt.Errorf("mark todo list synced: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) MarkTodoListSyncError(uuid, detail string) error {
+	_, err := s.db.Exec(`UPDATE todo_lists SET last_sync_error = ? WHERE uuid = ?`, detail, uuid)
+	if err != nil {
+		return fmt.Errorf("mark todo list sync error: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) SaveAITaskRun(run AITaskRunRecord) error {
@@ -552,11 +861,164 @@ func scanRecord(scanner interface {
 	return record, nil
 }
 
+func scanTodo(scanner interface {
+	Scan(dest ...any) error
+}) (TodoRecord, error) {
+	var todo TodoRecord
+	var completedAt, deletedAt, archivedAt, deadline, syncedAt sql.NullString
+	var createdAt, updatedAt, clientCreatedAt, clientUpdatedAt string
+	if err := scanner.Scan(
+		&todo.UUID, &todo.ParentUUID, &todo.Content, &todo.Notes, &todo.Completed, &todo.SortOrder, &todo.ListUUID,
+		&completedAt, &deletedAt, &archivedAt, &deadline, &todo.GoalUUID, &todo.MilestoneUUID,
+		&todo.CategoryUUID, &todo.TaskRole, &todo.TodoSource, &todo.CompletionMode, &todo.CompletionSource,
+		&todo.AIEvaluationStatus, &todo.AICompletionSummary, &createdAt, &updatedAt, &clientCreatedAt,
+		&clientUpdatedAt, &syncedAt, &todo.LastSyncError,
+	); err != nil {
+		return TodoRecord{}, err
+	}
+	var err error
+	if todo.CompletedAt, err = parseNullTime(completedAt); err != nil {
+		return TodoRecord{}, fmt.Errorf("parse completed_at: %w", err)
+	}
+	if todo.DeletedAt, err = parseNullTime(deletedAt); err != nil {
+		return TodoRecord{}, fmt.Errorf("parse deleted_at: %w", err)
+	}
+	if todo.ArchivedAt, err = parseNullTime(archivedAt); err != nil {
+		return TodoRecord{}, fmt.Errorf("parse archived_at: %w", err)
+	}
+	if todo.Deadline, err = parseNullTime(deadline); err != nil {
+		return TodoRecord{}, fmt.Errorf("parse deadline: %w", err)
+	}
+	if todo.SyncedAt, err = parseNullTime(syncedAt); err != nil {
+		return TodoRecord{}, fmt.Errorf("parse synced_at: %w", err)
+	}
+	if todo.CreatedAt, err = parseTime(createdAt); err != nil {
+		return TodoRecord{}, fmt.Errorf("parse created_at: %w", err)
+	}
+	if todo.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return TodoRecord{}, fmt.Errorf("parse updated_at: %w", err)
+	}
+	if todo.ClientCreatedAt, err = parseTime(clientCreatedAt); err != nil {
+		return TodoRecord{}, fmt.Errorf("parse client_created_at: %w", err)
+	}
+	if todo.ClientUpdatedAt, err = parseTime(clientUpdatedAt); err != nil {
+		return TodoRecord{}, fmt.Errorf("parse client_updated_at: %w", err)
+	}
+	return todo, nil
+}
+
+func scanTodoList(scanner interface {
+	Scan(dest ...any) error
+}) (TodoListRecord, error) {
+	var list TodoListRecord
+	var deletedAt, syncedAt sql.NullString
+	var createdAt, updatedAt, clientCreatedAt, clientUpdatedAt string
+	if err := scanner.Scan(
+		&list.UUID, &list.Name, &list.Color, &list.Icon, &list.SortOrder, &deletedAt,
+		&createdAt, &updatedAt, &clientCreatedAt, &clientUpdatedAt, &syncedAt, &list.LastSyncError,
+	); err != nil {
+		return TodoListRecord{}, err
+	}
+	var err error
+	if list.DeletedAt, err = parseNullTime(deletedAt); err != nil {
+		return TodoListRecord{}, fmt.Errorf("parse deleted_at: %w", err)
+	}
+	if list.SyncedAt, err = parseNullTime(syncedAt); err != nil {
+		return TodoListRecord{}, fmt.Errorf("parse synced_at: %w", err)
+	}
+	if list.CreatedAt, err = parseTime(createdAt); err != nil {
+		return TodoListRecord{}, fmt.Errorf("parse created_at: %w", err)
+	}
+	if list.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return TodoListRecord{}, fmt.Errorf("parse updated_at: %w", err)
+	}
+	if list.ClientCreatedAt, err = parseTime(clientCreatedAt); err != nil {
+		return TodoListRecord{}, fmt.Errorf("parse client_created_at: %w", err)
+	}
+	if list.ClientUpdatedAt, err = parseTime(clientUpdatedAt); err != nil {
+		return TodoListRecord{}, fmt.Errorf("parse client_updated_at: %w", err)
+	}
+	return list, nil
+}
+
+func todoSelectSQL() string {
+	return `SELECT uuid, parent_uuid, content, notes, completed, sort_order, list_uuid,
+		completed_at, deleted_at, archived_at, deadline, goal_uuid, milestone_uuid,
+		category_uuid, task_role, todo_source, completion_mode, completion_source,
+		ai_evaluation_status, ai_completion_summary, created_at, updated_at,
+		client_created_at, client_updated_at, synced_at, last_sync_error
+		FROM todos`
+}
+
+func todoListSelectSQL() string {
+	return `SELECT uuid, name, color, icon, sort_order, deleted_at, created_at, updated_at,
+		client_created_at, client_updated_at, synced_at, last_sync_error
+		FROM todo_lists`
+}
+
 func formatNullTime(value *time.Time) any {
 	if value == nil {
 		return nil
 	}
 	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func createTodoSchema(tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS todo_lists (
+			uuid TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			color TEXT NOT NULL DEFAULT '',
+			icon TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			deleted_at TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			client_created_at TEXT NOT NULL,
+			client_updated_at TEXT NOT NULL,
+			synced_at TEXT,
+			last_sync_error TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_todo_lists_active_order ON todo_lists(deleted_at, sort_order, client_created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_todo_lists_pending ON todo_lists(synced_at, client_updated_at)`,
+		`CREATE TABLE IF NOT EXISTS todos (
+			uuid TEXT PRIMARY KEY,
+			parent_uuid TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			notes TEXT NOT NULL DEFAULT '',
+			completed INTEGER NOT NULL DEFAULT 0,
+			sort_order REAL NOT NULL DEFAULT 0,
+			list_uuid TEXT NOT NULL DEFAULT '',
+			completed_at TEXT,
+			deleted_at TEXT,
+			archived_at TEXT,
+			deadline TEXT,
+			goal_uuid TEXT NOT NULL DEFAULT '',
+			milestone_uuid TEXT NOT NULL DEFAULT '',
+			category_uuid TEXT NOT NULL DEFAULT '',
+			task_role TEXT NOT NULL DEFAULT '',
+			todo_source TEXT NOT NULL DEFAULT '',
+			completion_mode TEXT NOT NULL DEFAULT 'manual',
+			completion_source TEXT NOT NULL DEFAULT 'manual',
+			ai_evaluation_status TEXT NOT NULL DEFAULT 'not_requested',
+			ai_completion_summary TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			client_created_at TEXT NOT NULL,
+			client_updated_at TEXT NOT NULL,
+			synced_at TEXT,
+			last_sync_error TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_todos_active_order ON todos(deleted_at, completed, sort_order, client_created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_todos_list ON todos(list_uuid, deleted_at, completed, sort_order)`,
+		`CREATE INDEX IF NOT EXISTS idx_todos_pending ON todos(synced_at, client_updated_at)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("create todo schema: %w", err)
+		}
+	}
+	return nil
 }
 
 func createAISchema(tx *sql.Tx) error {

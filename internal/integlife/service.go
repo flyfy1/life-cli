@@ -54,12 +54,187 @@ type AICommandResult struct {
 	SyncDetail string
 }
 
+type TodoCommandResult struct {
+	Todo       TodoRecord
+	Synced     bool
+	SyncDetail string
+}
+
+type TodoListCommandResult struct {
+	List       TodoListRecord
+	Synced     bool
+	SyncDetail string
+}
+
 func NewService(store *Store, client *Client) *Service {
 	return &Service{
 		store:  store,
 		client: client,
 		now:    time.Now,
 	}
+}
+
+func (s *Service) AddTodo(ctx context.Context, content, notes, listRef string, order float64) (TodoCommandResult, error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return TodoCommandResult{}, fmt.Errorf("content must be non-empty")
+	}
+	listUUID, err := s.resolveOptionalListUUID(listRef)
+	if err != nil {
+		return TodoCommandResult{}, err
+	}
+	now := s.now().UTC()
+	todo := TodoRecord{
+		UUID:               newUUID(),
+		Content:            content,
+		Notes:              notes,
+		SortOrder:          order,
+		ListUUID:           listUUID,
+		CompletionMode:     "manual",
+		CompletionSource:   "manual",
+		AIEvaluationStatus: "not_requested",
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		ClientCreatedAt:    now,
+		ClientUpdatedAt:    now,
+	}
+	if err := s.store.SaveTodo(todo); err != nil {
+		return TodoCommandResult{}, err
+	}
+	synced, detail := s.bestEffortSync(ctx)
+	return TodoCommandResult{Todo: todo, Synced: synced, SyncDetail: detail}, nil
+}
+
+func (s *Service) UpdateTodo(ctx context.Context, ref string, mutate func(*TodoRecord) error) (TodoCommandResult, error) {
+	todo, err := s.store.ResolveTodo(ref)
+	if err != nil {
+		return TodoCommandResult{}, err
+	}
+	if mutate != nil {
+		if err := mutate(&todo); err != nil {
+			return TodoCommandResult{}, err
+		}
+	}
+	now := s.now().UTC()
+	todo.UpdatedAt = now
+	todo.ClientUpdatedAt = now
+	todo.SyncedAt = nil
+	todo.LastSyncError = ""
+	if err := s.store.SaveTodo(todo); err != nil {
+		return TodoCommandResult{}, err
+	}
+	synced, detail := s.bestEffortSync(ctx)
+	return TodoCommandResult{Todo: todo, Synced: synced, SyncDetail: detail}, nil
+}
+
+func (s *Service) CompleteTodo(ctx context.Context, ref string, completed bool) (TodoCommandResult, error) {
+	return s.UpdateTodo(ctx, ref, func(todo *TodoRecord) error {
+		now := s.now().UTC()
+		todo.Completed = completed
+		if completed {
+			todo.CompletedAt = &now
+		} else {
+			todo.CompletedAt = nil
+		}
+		return nil
+	})
+}
+
+func (s *Service) DeleteTodo(ctx context.Context, ref string) (TodoCommandResult, error) {
+	return s.UpdateTodo(ctx, ref, func(todo *TodoRecord) error {
+		now := s.now().UTC()
+		todo.DeletedAt = &now
+		return nil
+	})
+}
+
+func (s *Service) Todo(ref string) (TodoRecord, error) {
+	return s.store.ResolveTodo(ref)
+}
+
+func (s *Service) ListTodos(includeDeleted bool, completedFilter *bool, listRef string) ([]TodoRecord, error) {
+	listUUID := ""
+	if strings.TrimSpace(listRef) != "" {
+		var err error
+		listUUID, err = s.resolveOptionalListUUID(listRef)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s.store.ListTodos(includeDeleted, completedFilter, listUUID)
+}
+
+func (s *Service) AddTodoList(ctx context.Context, name, color, icon string, order int) (TodoListCommandResult, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return TodoListCommandResult{}, fmt.Errorf("list name must be non-empty")
+	}
+	now := s.now().UTC()
+	list := TodoListRecord{
+		UUID:            newUUID(),
+		Name:            name,
+		Color:           strings.TrimSpace(color),
+		Icon:            strings.TrimSpace(icon),
+		SortOrder:       order,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		ClientCreatedAt: now,
+		ClientUpdatedAt: now,
+	}
+	if err := s.store.SaveTodoList(list); err != nil {
+		return TodoListCommandResult{}, err
+	}
+	synced, detail := s.bestEffortSync(ctx)
+	return TodoListCommandResult{List: list, Synced: synced, SyncDetail: detail}, nil
+}
+
+func (s *Service) UpdateTodoList(ctx context.Context, ref string, mutate func(*TodoListRecord) error) (TodoListCommandResult, error) {
+	list, err := s.store.ResolveTodoList(ref)
+	if err != nil {
+		return TodoListCommandResult{}, err
+	}
+	if mutate != nil {
+		if err := mutate(&list); err != nil {
+			return TodoListCommandResult{}, err
+		}
+	}
+	now := s.now().UTC()
+	list.UpdatedAt = now
+	list.ClientUpdatedAt = now
+	list.SyncedAt = nil
+	list.LastSyncError = ""
+	if err := s.store.SaveTodoList(list); err != nil {
+		return TodoListCommandResult{}, err
+	}
+	synced, detail := s.bestEffortSync(ctx)
+	return TodoListCommandResult{List: list, Synced: synced, SyncDetail: detail}, nil
+}
+
+func (s *Service) DeleteTodoList(ctx context.Context, ref string) (TodoListCommandResult, error) {
+	return s.UpdateTodoList(ctx, ref, func(list *TodoListRecord) error {
+		now := s.now().UTC()
+		list.DeletedAt = &now
+		return nil
+	})
+}
+
+func (s *Service) ListTodoLists(includeDeleted bool) ([]TodoListRecord, error) {
+	return s.store.ListTodoLists(includeDeleted)
+}
+
+func (s *Service) TodoList(ref string) (TodoListRecord, error) {
+	return s.store.ResolveTodoList(ref)
+}
+
+func (s *Service) resolveOptionalListUUID(ref string) (string, error) {
+	if strings.TrimSpace(ref) == "" {
+		return "", nil
+	}
+	list, err := s.store.ResolveTodoList(ref)
+	if err != nil {
+		return "", fmt.Errorf("resolve list: %w", err)
+	}
+	return list.UUID, nil
 }
 
 func (s *Service) LogAndMaybeSync(ctx context.Context, logType, content string) (Record, bool, string, error) {
@@ -103,11 +278,8 @@ func (s *Service) SyncPending(ctx context.Context) (SyncResult, error) {
 	if err != nil {
 		return SyncResult{}, err
 	}
-	pendingCount := len(batch.StatusLogs) + len(batch.AITaskRuns) + len(batch.AITaskEvents)
+	pendingCount := len(batch.StatusLogs) + len(batch.TodoLists) + len(batch.Todos) + len(batch.AITaskRuns) + len(batch.AITaskEvents)
 	result := SyncResult{Pending: pendingCount}
-	if pendingCount == 0 {
-		return result, nil
-	}
 
 	ack, err := s.client.SyncRecords(ctx, batch)
 	if err != nil {
@@ -121,7 +293,14 @@ func (s *Service) SyncPending(ctx context.Context) (SyncResult, error) {
 		return SyncResult{}, err
 	}
 
-	result.Synced = len(ack.StatusLogUUIDs) + len(ack.AITaskRunSynced) + len(ack.AITaskEventSynced)
+	result.Synced = len(ack.StatusLogUUIDs) + len(ack.TodoListSynced) + len(ack.TodoSynced) +
+		len(ack.TodoListServerRows) + len(ack.TodoServerRecords) + len(ack.AITaskRunSynced) + len(ack.AITaskEventSynced)
+	for _, uuid := range ack.TodoListConflicts {
+		result.Failures = append(result.Failures, SyncFailure{UUID: uuid, Detail: "conflict: server newer"})
+	}
+	for _, uuid := range ack.TodoConflicts {
+		result.Failures = append(result.Failures, SyncFailure{UUID: uuid, Detail: "conflict: server newer"})
+	}
 	for _, uuid := range ack.AITaskRunConflicts {
 		result.Failures = append(result.Failures, SyncFailure{UUID: uuid, Detail: "conflict: server newer"})
 	}
@@ -466,6 +645,36 @@ func (s *Service) applySyncAck(ack SyncAck) error {
 			return err
 		}
 	}
+	for _, uuid := range ack.TodoListSynced {
+		if err := s.store.MarkTodoListSynced(uuid, ack.ServerTime); err != nil {
+			return err
+		}
+	}
+	for _, uuid := range ack.TodoListConflicts {
+		if err := s.store.MarkTodoListSyncError(uuid, "conflict: server newer"); err != nil {
+			return err
+		}
+	}
+	for _, list := range ack.TodoListServerRows {
+		if err := s.store.SaveTodoList(list); err != nil {
+			return err
+		}
+	}
+	for _, uuid := range ack.TodoSynced {
+		if err := s.store.MarkTodoSynced(uuid, ack.ServerTime); err != nil {
+			return err
+		}
+	}
+	for _, uuid := range ack.TodoConflicts {
+		if err := s.store.MarkTodoSyncError(uuid, "conflict: server newer"); err != nil {
+			return err
+		}
+	}
+	for _, todo := range ack.TodoServerRecords {
+		if err := s.store.SaveTodo(todo); err != nil {
+			return err
+		}
+	}
 	for _, uuid := range ack.AITaskRunSynced {
 		if err := s.store.MarkAITaskRunSynced(uuid, ack.ServerTime); err != nil {
 			return err
@@ -486,7 +695,7 @@ func (s *Service) applySyncAck(ack SyncAck) error {
 			return err
 		}
 	}
-	if err := s.store.UpdateSyncCursors([]string{"ai_task_runs", "ai_task_events"}, ack.ServerTime); err != nil {
+	if err := s.store.UpdateSyncCursors([]string{"todo_lists", "todos", "ai_task_runs", "ai_task_events"}, ack.ServerTime); err != nil {
 		return err
 	}
 	return nil
@@ -495,6 +704,16 @@ func (s *Service) applySyncAck(ack SyncAck) error {
 func (s *Service) markBatchSyncError(batch SyncBatch, detail string) error {
 	for _, record := range batch.StatusLogs {
 		if err := s.store.MarkSyncError(record.UUID, detail); err != nil {
+			return err
+		}
+	}
+	for _, list := range batch.TodoLists {
+		if err := s.store.MarkTodoListSyncError(list.UUID, detail); err != nil {
+			return err
+		}
+	}
+	for _, todo := range batch.Todos {
+		if err := s.store.MarkTodoSyncError(todo.UUID, detail); err != nil {
 			return err
 		}
 	}
@@ -515,6 +734,12 @@ func failuresForBatch(batch SyncBatch, detail string) []SyncFailure {
 	failures := []SyncFailure{}
 	for _, record := range batch.StatusLogs {
 		failures = append(failures, SyncFailure{UUID: record.UUID, Detail: detail})
+	}
+	for _, list := range batch.TodoLists {
+		failures = append(failures, SyncFailure{UUID: list.UUID, Detail: detail})
+	}
+	for _, todo := range batch.Todos {
+		failures = append(failures, SyncFailure{UUID: todo.UUID, Detail: detail})
 	}
 	for _, run := range batch.AITaskRuns {
 		failures = append(failures, SyncFailure{UUID: run.UUID, Detail: detail})

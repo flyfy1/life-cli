@@ -73,6 +73,12 @@ func run(ctx context.Context, args []string) error {
 	case "sync":
 		return cmdSync(ctx, service)
 
+	case "todo":
+		return cmdTodo(ctx, service, args[1:])
+
+	case "list":
+		return cmdTodoList(ctx, service, args[1:])
+
 	case "ai":
 		return cmdAI(ctx, service, args[1:])
 
@@ -138,6 +144,287 @@ func run(ctx context.Context, args []string) error {
 		fmt.Printf("sync skipped: %s\n", syncDetail)
 	}
 	return nil
+}
+
+func cmdTodo(ctx context.Context, service *integlife.Service, args []string) error {
+	if len(args) == 0 {
+		printTodoUsage(os.Stderr)
+		return errors.New("missing todo command")
+	}
+	switch args[0] {
+	case "add":
+		fs := flag.NewFlagSet("life todo add", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		notes := fs.String("notes", "", "todo notes")
+		listRef := fs.String("list", "", "list uuid, prefix, or name")
+		order := fs.Float64("order", 0, "sort order")
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], []string{"notes", "list", "order"}, []string{"json"})
+		if err != nil {
+			return err
+		}
+		content := strings.TrimSpace(strings.Join(positionals, " "))
+		result, err := service.AddTodo(ctx, content, *notes, *listRef, *order)
+		if err != nil {
+			return err
+		}
+		printTodoResult(result, *jsonOut)
+		return nil
+	case "list":
+		fs := flag.NewFlagSet("life todo list", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		all := fs.Bool("all", false, "include deleted todos")
+		done := fs.Bool("done", false, "show completed todos")
+		open := fs.Bool("open", false, "show open todos")
+		listRef := fs.String("list", "", "list uuid, prefix, or name")
+		jsonOut := fs.Bool("json", false, "print json")
+		if _, err := parseCommandFlags(fs, args[1:], []string{"list"}, []string{"all", "done", "open", "json"}); err != nil {
+			return err
+		}
+		if *done && *open {
+			return errors.New("--done and --open cannot be used together")
+		}
+		var completedFilter *bool
+		if *done || *open {
+			value := *done
+			completedFilter = &value
+		}
+		todos, err := service.ListTodos(*all, completedFilter, *listRef)
+		if err != nil {
+			return err
+		}
+		printTodoList(todos, *jsonOut)
+		return nil
+	case "show":
+		fs := flag.NewFlagSet("life todo show", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], nil, []string{"json"})
+		if err != nil {
+			return err
+		}
+		if len(positionals) != 1 {
+			return errors.New("usage: life todo show <uuid-or-prefix>")
+		}
+		todo, err := service.Todo(positionals[0])
+		if err != nil {
+			return err
+		}
+		printTodo(todo, *jsonOut)
+		return nil
+	case "update":
+		fs := flag.NewFlagSet("life todo update", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		content := fs.String("content", "", "new content")
+		notes := fs.String("notes", "", "new notes")
+		listRef := fs.String("list", "", "list uuid, prefix, or name")
+		clearList := fs.Bool("clear-list", false, "remove todo from list")
+		order := fs.Float64("order", 0, "sort order")
+		done := fs.Bool("done", false, "mark completed")
+		open := fs.Bool("open", false, "mark open")
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], []string{"content", "notes", "list", "order"}, []string{"clear-list", "done", "open", "json"})
+		if err != nil {
+			return err
+		}
+		if len(positionals) != 1 {
+			return errors.New("usage: life todo update <uuid-or-prefix> [flags]")
+		}
+		if *done && *open {
+			return errors.New("--done and --open cannot be used together")
+		}
+		hasChange := flagProvided(fs, "content") || flagProvided(fs, "notes") || flagProvided(fs, "list") ||
+			flagProvided(fs, "clear-list") || flagProvided(fs, "order") || flagProvided(fs, "done") || flagProvided(fs, "open")
+		if !hasChange {
+			return errors.New("todo update requires at least one field flag")
+		}
+		result, err := service.UpdateTodo(ctx, positionals[0], func(todo *integlife.TodoRecord) error {
+			if flagProvided(fs, "content") {
+				if strings.TrimSpace(*content) == "" {
+					return errors.New("--content must be non-empty")
+				}
+				todo.Content = strings.TrimSpace(*content)
+			}
+			if flagProvided(fs, "notes") {
+				todo.Notes = *notes
+			}
+			if flagProvided(fs, "list") {
+				list, err := service.TodoList(*listRef)
+				if err != nil {
+					return err
+				}
+				todo.ListUUID = list.UUID
+			}
+			if *clearList {
+				todo.ListUUID = ""
+			}
+			if flagProvided(fs, "order") {
+				todo.SortOrder = *order
+			}
+			if *done || *open {
+				now := time.Now().UTC()
+				todo.Completed = *done
+				if *done {
+					todo.CompletedAt = &now
+				} else {
+					todo.CompletedAt = nil
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		printTodoResult(result, *jsonOut)
+		return nil
+	case "done":
+		fs := flag.NewFlagSet("life todo done", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		undo := fs.Bool("undo", false, "mark open")
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], nil, []string{"undo", "json"})
+		if err != nil {
+			return err
+		}
+		if len(positionals) != 1 {
+			return errors.New("usage: life todo done <uuid-or-prefix>")
+		}
+		result, err := service.CompleteTodo(ctx, positionals[0], !*undo)
+		if err != nil {
+			return err
+		}
+		printTodoResult(result, *jsonOut)
+		return nil
+	case "delete":
+		fs := flag.NewFlagSet("life todo delete", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], nil, []string{"json"})
+		if err != nil {
+			return err
+		}
+		if len(positionals) != 1 {
+			return errors.New("usage: life todo delete <uuid-or-prefix>")
+		}
+		result, err := service.DeleteTodo(ctx, positionals[0])
+		if err != nil {
+			return err
+		}
+		printTodoResult(result, *jsonOut)
+		return nil
+	case "help", "-h", "--help":
+		printTodoUsage(os.Stdout)
+		return nil
+	default:
+		printTodoUsage(os.Stderr)
+		return fmt.Errorf("unknown todo command %q", args[0])
+	}
+}
+
+func cmdTodoList(ctx context.Context, service *integlife.Service, args []string) error {
+	if len(args) == 0 {
+		printTodoListUsage(os.Stderr)
+		return errors.New("missing list command")
+	}
+	switch args[0] {
+	case "add":
+		fs := flag.NewFlagSet("life list add", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		color := fs.String("color", "", "list color")
+		icon := fs.String("icon", "", "list icon")
+		order := fs.Int("order", 0, "sort order")
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], []string{"color", "icon", "order"}, []string{"json"})
+		if err != nil {
+			return err
+		}
+		name := strings.TrimSpace(strings.Join(positionals, " "))
+		result, err := service.AddTodoList(ctx, name, *color, *icon, *order)
+		if err != nil {
+			return err
+		}
+		printTodoListResult(result, *jsonOut)
+		return nil
+	case "list":
+		fs := flag.NewFlagSet("life list list", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		all := fs.Bool("all", false, "include deleted lists")
+		jsonOut := fs.Bool("json", false, "print json")
+		if _, err := parseCommandFlags(fs, args[1:], nil, []string{"all", "json"}); err != nil {
+			return err
+		}
+		lists, err := service.ListTodoLists(*all)
+		if err != nil {
+			return err
+		}
+		printTodoLists(lists, *jsonOut)
+		return nil
+	case "update":
+		fs := flag.NewFlagSet("life list update", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		name := fs.String("name", "", "new name")
+		color := fs.String("color", "", "new color")
+		icon := fs.String("icon", "", "new icon")
+		order := fs.Int("order", 0, "sort order")
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], []string{"name", "color", "icon", "order"}, []string{"json"})
+		if err != nil {
+			return err
+		}
+		if len(positionals) != 1 {
+			return errors.New("usage: life list update <uuid-prefix-or-name> [flags]")
+		}
+		hasChange := flagProvided(fs, "name") || flagProvided(fs, "color") || flagProvided(fs, "icon") || flagProvided(fs, "order")
+		if !hasChange {
+			return errors.New("list update requires at least one field flag")
+		}
+		result, err := service.UpdateTodoList(ctx, positionals[0], func(list *integlife.TodoListRecord) error {
+			if flagProvided(fs, "name") {
+				if strings.TrimSpace(*name) == "" {
+					return errors.New("--name must be non-empty")
+				}
+				list.Name = strings.TrimSpace(*name)
+			}
+			if flagProvided(fs, "color") {
+				list.Color = strings.TrimSpace(*color)
+			}
+			if flagProvided(fs, "icon") {
+				list.Icon = strings.TrimSpace(*icon)
+			}
+			if flagProvided(fs, "order") {
+				list.SortOrder = *order
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		printTodoListResult(result, *jsonOut)
+		return nil
+	case "delete":
+		fs := flag.NewFlagSet("life list delete", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], nil, []string{"json"})
+		if err != nil {
+			return err
+		}
+		if len(positionals) != 1 {
+			return errors.New("usage: life list delete <uuid-prefix-or-name>")
+		}
+		result, err := service.DeleteTodoList(ctx, positionals[0])
+		if err != nil {
+			return err
+		}
+		printTodoListResult(result, *jsonOut)
+		return nil
+	case "help", "-h", "--help":
+		printTodoListUsage(os.Stdout)
+		return nil
+	default:
+		printTodoListUsage(os.Stderr)
+		return fmt.Errorf("unknown list command %q", args[0])
+	}
 }
 
 func cmdAI(ctx context.Context, service *integlife.Service, args []string) error {
@@ -493,6 +780,174 @@ func printAIRunStatus(run integlife.AITaskRunRecord, jsonOut bool) {
 	}
 }
 
+func printTodoResult(result integlife.TodoCommandResult, jsonOut bool) {
+	if jsonOut {
+		printTodo(result.Todo, true)
+		return
+	}
+	state := "open"
+	if result.Todo.Completed {
+		state = "done"
+	}
+	if result.Todo.DeletedAt != nil {
+		state = "deleted"
+	}
+	fmt.Printf("todo: %s [%s] %s\n", result.Todo.UUID, state, result.Todo.Content)
+	if result.Synced {
+		fmt.Printf("sync ok: %s\n", result.SyncDetail)
+	} else if result.SyncDetail != "" {
+		fmt.Printf("sync skipped: %s\n", result.SyncDetail)
+	}
+}
+
+func printTodo(todo integlife.TodoRecord, jsonOut bool) {
+	if jsonOut {
+		printJSON(todoJSON(todo))
+		return
+	}
+	state := "open"
+	if todo.Completed {
+		state = "done"
+	}
+	if todo.DeletedAt != nil {
+		state = "deleted"
+	}
+	fmt.Printf("uuid: %s\n", todo.UUID)
+	fmt.Printf("state: %s\n", state)
+	fmt.Printf("content: %s\n", todo.Content)
+	if todo.Notes != "" {
+		fmt.Printf("notes: %s\n", todo.Notes)
+	}
+	if todo.ListUUID != "" {
+		fmt.Printf("list: %s\n", todo.ListUUID)
+	}
+	if todo.LastSyncError != "" {
+		fmt.Printf("sync conflict/error: %s\n", todo.LastSyncError)
+	}
+}
+
+func printTodoList(todos []integlife.TodoRecord, jsonOut bool) {
+	if jsonOut {
+		out := make([]map[string]any, 0, len(todos))
+		for _, todo := range todos {
+			out = append(out, todoJSON(todo))
+		}
+		printJSON(out)
+		return
+	}
+	if len(todos) == 0 {
+		fmt.Println("no todos")
+		return
+	}
+	for _, todo := range todos {
+		marker := "[ ]"
+		if todo.Completed {
+			marker = "[x]"
+		}
+		if todo.DeletedAt != nil {
+			marker = "[-]"
+		}
+		listSuffix := ""
+		if todo.ListUUID != "" {
+			listSuffix = " list=" + todo.ListUUID
+		}
+		syncSuffix := ""
+		if todo.LastSyncError != "" {
+			syncSuffix = " sync_error=" + todo.LastSyncError
+		}
+		fmt.Printf("%s %s %s%s%s\n", shortID(todo.UUID), marker, todo.Content, listSuffix, syncSuffix)
+	}
+}
+
+func printTodoListResult(result integlife.TodoListCommandResult, jsonOut bool) {
+	if jsonOut {
+		printJSON(todoListJSON(result.List))
+		return
+	}
+	state := "active"
+	if result.List.DeletedAt != nil {
+		state = "deleted"
+	}
+	fmt.Printf("list: %s [%s] %s\n", result.List.UUID, state, result.List.Name)
+	if result.Synced {
+		fmt.Printf("sync ok: %s\n", result.SyncDetail)
+	} else if result.SyncDetail != "" {
+		fmt.Printf("sync skipped: %s\n", result.SyncDetail)
+	}
+}
+
+func printTodoLists(lists []integlife.TodoListRecord, jsonOut bool) {
+	if jsonOut {
+		out := make([]map[string]any, 0, len(lists))
+		for _, list := range lists {
+			out = append(out, todoListJSON(list))
+		}
+		printJSON(out)
+		return
+	}
+	if len(lists) == 0 {
+		fmt.Println("no lists")
+		return
+	}
+	for _, list := range lists {
+		state := ""
+		if list.DeletedAt != nil {
+			state = " deleted"
+		}
+		style := ""
+		if list.Color != "" || list.Icon != "" {
+			style = fmt.Sprintf(" color=%s icon=%s", list.Color, list.Icon)
+		}
+		syncSuffix := ""
+		if list.LastSyncError != "" {
+			syncSuffix = " sync_error=" + list.LastSyncError
+		}
+		fmt.Printf("%s %s%s%s%s\n", shortID(list.UUID), list.Name, state, style, syncSuffix)
+	}
+}
+
+func todoJSON(todo integlife.TodoRecord) map[string]any {
+	return map[string]any{
+		"uuid":            todo.UUID,
+		"content":         todo.Content,
+		"notes":           todo.Notes,
+		"completed":       todo.Completed,
+		"order":           todo.SortOrder,
+		"list_uuid":       todo.ListUUID,
+		"completed_at":    formatTimePtr(todo.CompletedAt),
+		"deleted_at":      formatTimePtr(todo.DeletedAt),
+		"updated_at":      todo.ClientUpdatedAt.Format(time.RFC3339Nano),
+		"last_sync_error": todo.LastSyncError,
+	}
+}
+
+func todoListJSON(list integlife.TodoListRecord) map[string]any {
+	return map[string]any{
+		"uuid":            list.UUID,
+		"name":            list.Name,
+		"color":           list.Color,
+		"icon":            list.Icon,
+		"sort_order":      list.SortOrder,
+		"deleted_at":      formatTimePtr(list.DeletedAt),
+		"updated_at":      list.ClientUpdatedAt.Format(time.RFC3339Nano),
+		"last_sync_error": list.LastSyncError,
+	}
+}
+
+func formatTimePtr(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func shortID(uuid string) string {
+	if len(uuid) <= 8 {
+		return uuid
+	}
+	return uuid[:8]
+}
+
 func printJSON(value any) {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
@@ -512,6 +967,51 @@ func flagProvided(fs *flag.FlagSet, name string) bool {
 	return provided
 }
 
+func parseCommandFlags(fs *flag.FlagSet, args []string, valueFlagNames []string, boolFlagNames []string) ([]string, error) {
+	valueFlags := make(map[string]bool, len(valueFlagNames))
+	for _, name := range valueFlagNames {
+		valueFlags[name] = true
+	}
+	boolFlags := make(map[string]bool, len(boolFlagNames))
+	for _, name := range boolFlagNames {
+		boolFlags[name] = true
+	}
+
+	flagArgs := []string{}
+	positionals := []string{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if strings.HasPrefix(arg, "--") && len(arg) > 2 {
+			nameWithValue := strings.TrimPrefix(arg, "--")
+			name, _, hasValue := strings.Cut(nameWithValue, "=")
+			switch {
+			case valueFlags[name]:
+				flagArgs = append(flagArgs, arg)
+				if !hasValue {
+					if i+1 >= len(args) {
+						return nil, fmt.Errorf("--%s requires a value", name)
+					}
+					i++
+					flagArgs = append(flagArgs, args[i])
+				}
+				continue
+			case boolFlags[name]:
+				flagArgs = append(flagArgs, arg)
+				continue
+			}
+		}
+		positionals = append(positionals, arg)
+	}
+	if err := fs.Parse(flagArgs); err != nil {
+		return nil, err
+	}
+	return positionals, nil
+}
+
 func printUsage(out *os.File) {
 	moods := make([]string, len(validMoods))
 	for i, m := range validMoods {
@@ -525,6 +1025,8 @@ func printUsage(out *os.File) {
   life login                            authenticate and save token
   life logout                           remove saved token
   life sync                             push pending entries to the server
+  life todo <command>                   manage todos
+  life list <command>                   manage todo lists
   life ai <command>                     report AI task progress
 
 moods: %s
@@ -535,6 +1037,26 @@ examples:
   life --mood happy 'shipped the feature!'
   life work --mood focused 'deep work session'
 `, strings.Join(moods, ", "))
+}
+
+func printTodoUsage(out *os.File) {
+	fmt.Fprint(out, `usage:
+  life todo add [--notes <text>] [--list <list>] [--order <n>] <content>
+  life todo list [--open|--done] [--all] [--list <list>] [--json]
+  life todo show <uuid-or-prefix> [--json]
+  life todo update <uuid-or-prefix> [--content <text>] [--notes <text>] [--list <list>] [--clear-list] [--order <n>] [--done|--open]
+  life todo done <uuid-or-prefix> [--undo]
+  life todo delete <uuid-or-prefix>
+`)
+}
+
+func printTodoListUsage(out *os.File) {
+	fmt.Fprint(out, `usage:
+  life list add [--color <value>] [--icon <value>] [--order <n>] <name>
+  life list list [--all] [--json]
+  life list update <uuid-prefix-or-name> [--name <text>] [--color <value>] [--icon <value>] [--order <n>]
+  life list delete <uuid-prefix-or-name>
+`)
 }
 
 func printAIUsage(out *os.File) {

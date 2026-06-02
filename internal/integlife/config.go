@@ -18,7 +18,7 @@ type Config struct {
 func LoadConfig() Config {
 	return Config{
 		APIURL:   firstNonEmpty(os.Getenv("INTEGLIFE_API_URL"), defaultAPIURL),
-		APIToken: loadAPIToken(),
+		APIToken: firstNonEmpty(os.Getenv("INTEGLIFE_API_TOKEN"), loadAPIToken()),
 		DBPath:   firstNonEmpty(os.Getenv("INTEGLIFE_DB_PATH"), defaultDBPath()),
 	}
 }

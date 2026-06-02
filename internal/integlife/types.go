@@ -13,6 +13,50 @@ type Record struct {
 	LastSyncError string
 }
 
+type TodoRecord struct {
+	UUID                string
+	ParentUUID          string
+	Content             string
+	Notes               string
+	Completed           bool
+	SortOrder           float64
+	ListUUID            string
+	CompletedAt         *time.Time
+	DeletedAt           *time.Time
+	ArchivedAt          *time.Time
+	Deadline            *time.Time
+	GoalUUID            string
+	MilestoneUUID       string
+	CategoryUUID        string
+	TaskRole            string
+	TodoSource          string
+	CompletionMode      string
+	CompletionSource    string
+	AIEvaluationStatus  string
+	AICompletionSummary string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	ClientCreatedAt     time.Time
+	ClientUpdatedAt     time.Time
+	SyncedAt            *time.Time
+	LastSyncError       string
+}
+
+type TodoListRecord struct {
+	UUID            string
+	Name            string
+	Color           string
+	Icon            string
+	SortOrder       int
+	DeletedAt       *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	ClientCreatedAt time.Time
+	ClientUpdatedAt time.Time
+	SyncedAt        *time.Time
+	LastSyncError   string
+}
+
 type SyncFailure struct {
 	UUID   string
 	Detail string
@@ -88,6 +132,8 @@ type SyncCursor struct {
 
 type SyncBatch struct {
 	StatusLogs   []Record
+	Todos        []TodoRecord
+	TodoLists    []TodoListRecord
 	AITaskRuns   []AITaskRunRecord
 	AITaskEvents []AITaskEventRecord
 	Cursors      map[string]time.Time
@@ -95,6 +141,12 @@ type SyncBatch struct {
 
 type SyncAck struct {
 	StatusLogUUIDs     []string
+	TodoSynced         []string
+	TodoConflicts      []string
+	TodoServerRecords  []TodoRecord
+	TodoListSynced     []string
+	TodoListConflicts  []string
+	TodoListServerRows []TodoListRecord
 	AITaskRunSynced    []string
 	AITaskRunConflicts []string
 	AITaskEventSynced  []string

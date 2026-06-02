@@ -151,7 +151,8 @@ type syncPayload struct {
 	Goals             []any              `json:"goals"`
 	GoalMilestones    []any              `json:"goal_milestones"`
 	GoalCheckins      []any              `json:"goal_checkins"`
-	Todos             []any              `json:"todos"`
+	Todos             []syncTodo         `json:"todos"`
+	TodoLists         []syncTodoList     `json:"todo_lists"`
 	Events            []any              `json:"events"`
 	Pomodoros         []any              `json:"pomodoros"`
 	StatusLogs        []syncStatusLog    `json:"status_logs"`
@@ -167,6 +168,44 @@ type syncStatusLog struct {
 	UserID    int    `json:"user_id"`
 	LogType   string `json:"log_type"`
 	Content   string `json:"content"`
+}
+
+type syncTodo struct {
+	CreatedAt           string  `json:"created_at"`
+	UpdatedAt           string  `json:"updated_at"`
+	UserID              int     `json:"user_id"`
+	UUID                string  `json:"uuid"`
+	ParentUUID          string  `json:"parent_uuid"`
+	DeletedAt           *string `json:"deleted_at,omitempty"`
+	ArchivedAt          *string `json:"archived_at,omitempty"`
+	Deadline            *string `json:"deadline,omitempty"`
+	Content             string  `json:"content"`
+	Notes               string  `json:"notes"`
+	Completed           bool    `json:"completed"`
+	Order               float64 `json:"order"`
+	GoalUUID            *string `json:"goal_uuid,omitempty"`
+	MilestoneUUID       *string `json:"milestone_uuid,omitempty"`
+	TaskRole            string  `json:"task_role,omitempty"`
+	TodoSource          string  `json:"todo_source,omitempty"`
+	CompletionMode      string  `json:"completion_mode,omitempty"`
+	AIEvaluationStatus  string  `json:"ai_evaluation_status,omitempty"`
+	AICompletionSummary string  `json:"ai_completion_summary,omitempty"`
+	CompletedAt         *string `json:"completed_at,omitempty"`
+	CompletionSource    string  `json:"completion_source,omitempty"`
+	ListUUID            *string `json:"list_uuid,omitempty"`
+	CategoryUUID        *string `json:"category_uuid,omitempty"`
+}
+
+type syncTodoList struct {
+	CreatedAt string  `json:"created_at"`
+	UpdatedAt string  `json:"updated_at"`
+	UserID    int     `json:"user_id"`
+	UUID      string  `json:"uuid"`
+	DeletedAt *string `json:"deleted_at,omitempty"`
+	Name      string  `json:"name"`
+	Color     string  `json:"color,omitempty"`
+	Icon      string  `json:"icon,omitempty"`
+	SortOrder int     `json:"sort_order"`
 }
 
 func buildSyncPayload(record Record) syncPayload {
@@ -219,6 +258,10 @@ type syncAITaskEvent struct {
 
 type syncResponse struct {
 	ServerTime             string            `json:"server_time"`
+	TodosServerNewer       []syncTodo        `json:"todos_server_newer"`
+	TodosOnlyOnServer      []syncTodo        `json:"todos_only_on_server"`
+	TodoListsServerNewer   []syncTodoList    `json:"todo_lists_server_newer"`
+	TodoListsOnlyOnServer  []syncTodoList    `json:"todo_lists_only_on_server"`
 	AITaskRunsServerNewer  []syncResponseRun `json:"ai_task_runs_server_newer"`
 	AITaskRunsOnlyOnServer []syncResponseRun `json:"ai_task_runs_only_on_server"`
 	AITaskEventsAccepted   []string          `json:"ai_task_events_accepted"`
@@ -240,6 +283,12 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 	if len(batch.StatusLogs) > 0 {
 		models = append(models, "status_logs")
 	}
+	if len(batch.TodoLists) > 0 {
+		models = append(models, "todo_lists")
+	}
+	if len(batch.Todos) > 0 {
+		models = append(models, "todos")
+	}
 	if len(batch.AITaskRuns) > 0 {
 		models = append(models, "ai_task_runs")
 	}
@@ -247,7 +296,7 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 		models = append(models, "ai_task_events")
 	}
 	if len(models) == 0 {
-		models = []string{"status_logs", "ai_task_runs", "ai_task_events"}
+		models = []string{"status_logs", "todo_lists", "todos", "ai_task_runs", "ai_task_events"}
 	}
 	lastSyncAtByModel := map[string]*string{}
 	for _, model := range models {
@@ -259,8 +308,7 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 			formatted := cursor.UTC().Format(time.RFC3339Nano)
 			lastSyncAtByModel[model] = &formatted
 		} else {
-			formatted := time.Now().UTC().Format(time.RFC3339Nano)
-			lastSyncAtByModel[model] = &formatted
+			lastSyncAtByModel[model] = nil
 		}
 	}
 
@@ -275,6 +323,16 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 			LogType:   record.LogType,
 			Content:   record.Content,
 		})
+	}
+
+	todoLists := make([]syncTodoList, 0, len(batch.TodoLists))
+	for _, list := range batch.TodoLists {
+		todoLists = append(todoLists, todoListToSync(list))
+	}
+
+	todos := make([]syncTodo, 0, len(batch.Todos))
+	for _, todo := range batch.Todos {
+		todos = append(todos, todoToSync(todo))
 	}
 
 	runs := make([]syncAITaskRun, 0, len(batch.AITaskRuns))
@@ -339,7 +397,8 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 		Goals:             []any{},
 		GoalMilestones:    []any{},
 		GoalCheckins:      []any{},
-		Todos:             []any{},
+		Todos:             todos,
+		TodoLists:         todoLists,
 		Events:            []any{},
 		Pomodoros:         []any{},
 		StatusLogs:        statusLogs,
@@ -361,16 +420,69 @@ func buildSyncAck(batch SyncBatch, resp syncResponse, detail string) SyncAck {
 		runConflicts[run.UUID] = true
 	}
 	ack := SyncAck{
-		StatusLogUUIDs:    make([]string, 0, len(batch.StatusLogs)),
-		AITaskRunSynced:   []string{},
-		AITaskEventSynced: []string{},
-		AITaskEventErrors: map[string]string{},
-		ServerTime:        serverTime,
-		Detail:            detail,
+		StatusLogUUIDs:     make([]string, 0, len(batch.StatusLogs)),
+		TodoSynced:         []string{},
+		TodoServerRecords:  []TodoRecord{},
+		TodoListSynced:     []string{},
+		TodoListServerRows: []TodoListRecord{},
+		AITaskRunSynced:    []string{},
+		AITaskEventSynced:  []string{},
+		AITaskEventErrors:  map[string]string{},
+		ServerTime:         serverTime,
+		Detail:             detail,
 	}
 	for _, record := range batch.StatusLogs {
 		ack.StatusLogUUIDs = append(ack.StatusLogUUIDs, record.UUID)
 	}
+
+	pendingLists := map[string]bool{}
+	for _, list := range batch.TodoLists {
+		pendingLists[list.UUID] = true
+	}
+	listConflicts := map[string]bool{}
+	for _, list := range resp.TodoListsServerNewer {
+		if pendingLists[list.UUID] {
+			listConflicts[list.UUID] = true
+			ack.TodoListConflicts = append(ack.TodoListConflicts, list.UUID)
+			continue
+		}
+		ack.TodoListServerRows = append(ack.TodoListServerRows, todoListFromSync(list, serverTime))
+	}
+	for _, list := range resp.TodoListsOnlyOnServer {
+		if !pendingLists[list.UUID] {
+			ack.TodoListServerRows = append(ack.TodoListServerRows, todoListFromSync(list, serverTime))
+		}
+	}
+	for _, list := range batch.TodoLists {
+		if !listConflicts[list.UUID] {
+			ack.TodoListSynced = append(ack.TodoListSynced, list.UUID)
+		}
+	}
+
+	pendingTodos := map[string]bool{}
+	for _, todo := range batch.Todos {
+		pendingTodos[todo.UUID] = true
+	}
+	todoConflicts := map[string]bool{}
+	for _, todo := range resp.TodosServerNewer {
+		if pendingTodos[todo.UUID] {
+			todoConflicts[todo.UUID] = true
+			ack.TodoConflicts = append(ack.TodoConflicts, todo.UUID)
+			continue
+		}
+		ack.TodoServerRecords = append(ack.TodoServerRecords, todoFromSync(todo, serverTime))
+	}
+	for _, todo := range resp.TodosOnlyOnServer {
+		if !pendingTodos[todo.UUID] {
+			ack.TodoServerRecords = append(ack.TodoServerRecords, todoFromSync(todo, serverTime))
+		}
+	}
+	for _, todo := range batch.Todos {
+		if !todoConflicts[todo.UUID] {
+			ack.TodoSynced = append(ack.TodoSynced, todo.UUID)
+		}
+	}
+
 	for _, run := range batch.AITaskRuns {
 		if runConflicts[run.UUID] {
 			ack.AITaskRunConflicts = append(ack.AITaskRunConflicts, run.UUID)
@@ -402,10 +514,139 @@ func buildSyncAck(batch SyncBatch, resp syncResponse, detail string) SyncAck {
 	return ack
 }
 
+func todoToSync(todo TodoRecord) syncTodo {
+	return syncTodo{
+		CreatedAt:           todo.ClientCreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:           todo.ClientUpdatedAt.UTC().Format(time.RFC3339Nano),
+		UserID:              0,
+		UUID:                todo.UUID,
+		ParentUUID:          todo.ParentUUID,
+		DeletedAt:           timePtrString(todo.DeletedAt),
+		ArchivedAt:          timePtrString(todo.ArchivedAt),
+		Deadline:            timePtrString(todo.Deadline),
+		Content:             todo.Content,
+		Notes:               todo.Notes,
+		Completed:           todo.Completed,
+		Order:               todo.SortOrder,
+		GoalUUID:            optionalString(todo.GoalUUID),
+		MilestoneUUID:       optionalString(todo.MilestoneUUID),
+		TaskRole:            todo.TaskRole,
+		TodoSource:          todo.TodoSource,
+		CompletionMode:      defaultString(todo.CompletionMode, "manual"),
+		AIEvaluationStatus:  defaultString(todo.AIEvaluationStatus, "not_requested"),
+		AICompletionSummary: todo.AICompletionSummary,
+		CompletedAt:         timePtrString(todo.CompletedAt),
+		CompletionSource:    defaultString(todo.CompletionSource, "manual"),
+		ListUUID:            optionalString(todo.ListUUID),
+		CategoryUUID:        optionalString(todo.CategoryUUID),
+	}
+}
+
+func todoFromSync(todo syncTodo, syncedAt time.Time) TodoRecord {
+	createdAt := parseSyncTimeOrNow(todo.CreatedAt, syncedAt)
+	updatedAt := parseSyncTimeOrNow(todo.UpdatedAt, syncedAt)
+	return TodoRecord{
+		UUID:                todo.UUID,
+		ParentUUID:          todo.ParentUUID,
+		Content:             todo.Content,
+		Notes:               todo.Notes,
+		Completed:           todo.Completed,
+		SortOrder:           todo.Order,
+		ListUUID:            derefString(todo.ListUUID),
+		CompletedAt:         parseSyncTimePtr(todo.CompletedAt),
+		DeletedAt:           parseSyncTimePtr(todo.DeletedAt),
+		ArchivedAt:          parseSyncTimePtr(todo.ArchivedAt),
+		Deadline:            parseSyncTimePtr(todo.Deadline),
+		GoalUUID:            derefString(todo.GoalUUID),
+		MilestoneUUID:       derefString(todo.MilestoneUUID),
+		CategoryUUID:        derefString(todo.CategoryUUID),
+		TaskRole:            todo.TaskRole,
+		TodoSource:          todo.TodoSource,
+		CompletionMode:      defaultString(todo.CompletionMode, "manual"),
+		CompletionSource:    defaultString(todo.CompletionSource, "manual"),
+		AIEvaluationStatus:  defaultString(todo.AIEvaluationStatus, "not_requested"),
+		AICompletionSummary: todo.AICompletionSummary,
+		CreatedAt:           createdAt,
+		UpdatedAt:           updatedAt,
+		ClientCreatedAt:     createdAt,
+		ClientUpdatedAt:     updatedAt,
+		SyncedAt:            &syncedAt,
+	}
+}
+
+func todoListToSync(list TodoListRecord) syncTodoList {
+	return syncTodoList{
+		CreatedAt: list.ClientCreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt: list.ClientUpdatedAt.UTC().Format(time.RFC3339Nano),
+		UserID:    0,
+		UUID:      list.UUID,
+		DeletedAt: timePtrString(list.DeletedAt),
+		Name:      list.Name,
+		Color:     list.Color,
+		Icon:      list.Icon,
+		SortOrder: list.SortOrder,
+	}
+}
+
+func todoListFromSync(list syncTodoList, syncedAt time.Time) TodoListRecord {
+	createdAt := parseSyncTimeOrNow(list.CreatedAt, syncedAt)
+	updatedAt := parseSyncTimeOrNow(list.UpdatedAt, syncedAt)
+	return TodoListRecord{
+		UUID:            list.UUID,
+		Name:            list.Name,
+		Color:           list.Color,
+		Icon:            list.Icon,
+		SortOrder:       list.SortOrder,
+		DeletedAt:       parseSyncTimePtr(list.DeletedAt),
+		CreatedAt:       createdAt,
+		UpdatedAt:       updatedAt,
+		ClientCreatedAt: createdAt,
+		ClientUpdatedAt: updatedAt,
+		SyncedAt:        &syncedAt,
+	}
+}
+
 func timePtrString(value *time.Time) *string {
 	if value == nil {
 		return nil
 	}
 	formatted := value.UTC().Format(time.RFC3339Nano)
 	return &formatted
+}
+
+func optionalString(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	v := value
+	return &v
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func parseSyncTimePtr(value *string) *time.Time {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, *value)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func parseSyncTimeOrNow(value string, fallback time.Time) time.Time {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }

@@ -10,6 +10,7 @@ It is intentionally independent from the main `life-on-golang` backend codebase.
 - Best-effort sync to `/api/notes/sync`
 - Keep working offline when the network or token is unavailable
 - Retry unsynced records later with `sync`
+- Manage todos and todo lists locally with best-effort sync
 - Track AI task runs and progress events locally first
 
 ## Install
@@ -58,6 +59,10 @@ This creates binaries for all supported platforms in the `./build` directory and
 ./life ai start --project goal:<uuid> --todo <uuid> --title "Implement sync" --agent codex --json
 ./life ai progress --run <run_uuid> --phase coding --summary "Wrote local storage"
 ./life ai complete --run <run_uuid> --summary "Finished implementation"
+./life list add Work --color blue --icon briefcase
+./life todo add --list Work "Write release notes"
+./life todo list --open
+./life todo done <todo_uuid_or_prefix>
 ./life sync
 ```
 
@@ -69,6 +74,8 @@ This creates binaries for all supported platforms in the `./build` directory and
 - `life login` - Authenticate and save API token
 - `life logout` - Remove saved API token
 - `life sync` - Push all pending entries to the server
+- `life list add/list/update/delete` - Manage todo lists
+- `life todo add/list/show/update/done/delete` - Manage todos
 - `life ai start/progress/heartbeat/event/block/complete/status/resume/resolve` - Track AI task execution progress
 - `life --version` - Show version
 
@@ -86,9 +93,10 @@ Primary variables:
 - `log` writes to the local SQLite database immediately.
 - If a token is configured, `log` also tries to sync the new record right away.
 - `sync` sends every unsynced record in timestamp order.
+- Todo and list writes are local first. If a token is configured, the CLI tries to sync through `/api/notes/sync` immediately and leaves failed records pending.
 - AI task events use a canonical SHA-256 payload hash. `metadata-json` must not contain JSON numbers; use strings for numeric values.
 - Sync failures do not delete local data.
 
 ## API compatibility
 
-This project targets the existing LifeOnGolang `/api/notes/sync` contract for `status_logs`, but it does not import any code from that repository.
+This project targets the existing LifeOnGolang `/api/notes/sync` contract for `status_logs`, `todo_lists`, `todos`, `ai_task_runs`, and `ai_task_events`, but it does not import any code from that repository.
