@@ -56,6 +56,11 @@ func TestBuildSyncBatchPayloadIncludesAIModelsAndCursors(t *testing.T) {
 			CompletionMode: "manual", CompletionSource: "manual", AIEvaluationStatus: "not_requested",
 			CreatedAt: now, UpdatedAt: now, ClientCreatedAt: now, ClientUpdatedAt: now,
 		}},
+		TodoReplies: []TodoReplyRecord{{
+			UUID: "reply-1", TodoUUID: "todo-1", Content: "Implemented and verified.",
+			SourceType: "api_token", SourceName: "Codex", ActorDisplayName: "Codex",
+			CreatedAt: now, UpdatedAt: now, ClientCreatedAt: now, ClientUpdatedAt: now,
+		}},
 		AITaskRuns: []AITaskRunRecord{{
 			UUID: "run-1", ProjectType: "goal", ProjectUUID: "goal-1", TodoUUID: "todo-1",
 			AgentName: "codex", Status: "running", CreatedAt: now, UpdatedAt: now, ClientCreatedAt: now, ClientUpdatedAt: now,
@@ -65,17 +70,17 @@ func TestBuildSyncBatchPayloadIncludesAIModelsAndCursors(t *testing.T) {
 			MetadataJSON: "{}", PayloadHashVersion: 1, PayloadHash: "hash", OccurredAt: now, CreatedAt: now, UpdatedAt: now,
 			ClientCreatedAt: now, ClientUpdatedAt: now,
 		}},
-		Cursors: map[string]time.Time{"todo_lists": cursor, "todos": cursor, "ai_task_runs": cursor, "ai_task_events": cursor},
+		Cursors: map[string]time.Time{"todo_lists": cursor, "todos": cursor, "todo_replies": cursor, "ai_task_runs": cursor, "ai_task_events": cursor},
 	})
 
-	wantModels := []string{"status_logs", "todo_lists", "todos", "ai_task_runs", "ai_task_events"}
+	wantModels := []string{"status_logs", "todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events"}
 	if !reflect.DeepEqual(payload.SyncModels, wantModels) {
 		t.Fatalf("SyncModels = %v, want %v", payload.SyncModels, wantModels)
 	}
 	if payload.LastSyncAtByModel["status_logs"] != nil {
 		t.Fatalf("status_logs cursor = %v, want nil", payload.LastSyncAtByModel["status_logs"])
 	}
-	for _, model := range []string{"todo_lists", "todos", "ai_task_runs", "ai_task_events"} {
+	for _, model := range []string{"todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events"} {
 		got := payload.LastSyncAtByModel[model]
 		if got == nil || *got != cursor.Format(time.RFC3339Nano) {
 			t.Fatalf("%s cursor = %v, want %s", model, got, cursor.Format(time.RFC3339Nano))
@@ -86,6 +91,9 @@ func TestBuildSyncBatchPayloadIncludesAIModelsAndCursors(t *testing.T) {
 	}
 	if payload.Todos[0].ListUUID == nil || *payload.Todos[0].ListUUID != "list-1" {
 		t.Fatalf("todo list uuid = %v, want list-1", payload.Todos[0].ListUUID)
+	}
+	if len(payload.TodoReplies) != 1 || payload.TodoReplies[0].TodoUUID != "todo-1" {
+		t.Fatalf("todo reply payload = %#v, want one reply for todo-1", payload.TodoReplies)
 	}
 	if len(payload.AITaskRuns) != 1 || len(payload.AITaskEvents) != 1 {
 		t.Fatalf("AI payload counts = runs %d events %d, want 1/1", len(payload.AITaskRuns), len(payload.AITaskEvents))
@@ -212,6 +220,16 @@ func TestSyncPendingPullsTodosWhenNoLocalPending(t *testing.T) {
 				"list_uuid":"list-1",
 				"created_at":"` + now.Format(time.RFC3339Nano) + `",
 				"updated_at":"` + now.Format(time.RFC3339Nano) + `"
+			}],
+			"todo_replies_only_on_server":[{
+				"uuid":"reply-1",
+				"todo_uuid":"todo-1",
+				"content":"Shipped by Codex.",
+				"source_type":"api_token",
+				"source_name":"life-cli",
+				"actor_display_name":"Song",
+				"created_at":"` + now.Format(time.RFC3339Nano) + `",
+				"updated_at":"` + now.Format(time.RFC3339Nano) + `"
 			}]
 		}`))
 	}))
@@ -222,8 +240,8 @@ func TestSyncPendingPullsTodosWhenNoLocalPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncPending() error = %v", err)
 	}
-	if result.Pending != 0 || result.Synced != 2 {
-		t.Fatalf("sync result = synced %d pending %d, want 2/0", result.Synced, result.Pending)
+	if result.Pending != 0 || result.Synced != 3 {
+		t.Fatalf("sync result = synced %d pending %d, want 3/0", result.Synced, result.Pending)
 	}
 	lists, err := store.ListTodoLists(false)
 	if err != nil {
@@ -235,6 +253,13 @@ func TestSyncPendingPullsTodosWhenNoLocalPending(t *testing.T) {
 	}
 	if len(lists) != 1 || len(todos) != 1 {
 		t.Fatalf("pulled counts = lists %d todos %d, want 1/1", len(lists), len(todos))
+	}
+	replies, err := store.ListTodoReplies("todo-1", false)
+	if err != nil {
+		t.Fatalf("ListTodoReplies() error = %v", err)
+	}
+	if len(replies) != 1 || replies[0].Content != "Shipped by Codex." {
+		t.Fatalf("pulled replies = %#v, want server reply", replies)
 	}
 }
 

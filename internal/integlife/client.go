@@ -152,6 +152,7 @@ type syncPayload struct {
 	GoalMilestones    []any              `json:"goal_milestones"`
 	GoalCheckins      []any              `json:"goal_checkins"`
 	Todos             []syncTodo         `json:"todos"`
+	TodoReplies       []syncTodoReply    `json:"todo_replies"`
 	TodoLists         []syncTodoList     `json:"todo_lists"`
 	Events            []any              `json:"events"`
 	Pomodoros         []any              `json:"pomodoros"`
@@ -208,6 +209,21 @@ type syncTodoList struct {
 	SortOrder int     `json:"sort_order"`
 }
 
+type syncTodoReply struct {
+	CreatedAt        string  `json:"created_at"`
+	UpdatedAt        string  `json:"updated_at"`
+	UserID           int     `json:"user_id"`
+	BookID           int     `json:"book_id"`
+	UUID             string  `json:"uuid"`
+	TodoUUID         string  `json:"todo_uuid"`
+	DeletedAt        *string `json:"deleted_at,omitempty"`
+	ActorUserID      int     `json:"actor_user_id"`
+	SourceType       string  `json:"source_type,omitempty"`
+	SourceName       string  `json:"source_name,omitempty"`
+	ActorDisplayName string  `json:"actor_display_name,omitempty"`
+	Content          string  `json:"content"`
+}
+
 func buildSyncPayload(record Record) syncPayload {
 	return buildSyncBatchPayload(SyncBatch{StatusLogs: []Record{record}})
 }
@@ -257,16 +273,18 @@ type syncAITaskEvent struct {
 }
 
 type syncResponse struct {
-	ServerTime             string            `json:"server_time"`
-	TodosServerNewer       []syncTodo        `json:"todos_server_newer"`
-	TodosOnlyOnServer      []syncTodo        `json:"todos_only_on_server"`
-	TodoListsServerNewer   []syncTodoList    `json:"todo_lists_server_newer"`
-	TodoListsOnlyOnServer  []syncTodoList    `json:"todo_lists_only_on_server"`
-	AITaskRunsServerNewer  []syncResponseRun `json:"ai_task_runs_server_newer"`
-	AITaskRunsOnlyOnServer []syncResponseRun `json:"ai_task_runs_only_on_server"`
-	AITaskEventsAccepted   []string          `json:"ai_task_events_accepted"`
-	AITaskEventsDuplicate  []string          `json:"ai_task_events_duplicate"`
-	AITaskEventsRejected   []syncEventReject `json:"ai_task_events_rejected"`
+	ServerTime              string            `json:"server_time"`
+	TodosServerNewer        []syncTodo        `json:"todos_server_newer"`
+	TodosOnlyOnServer       []syncTodo        `json:"todos_only_on_server"`
+	TodoRepliesServerNewer  []syncTodoReply   `json:"todo_replies_server_newer"`
+	TodoRepliesOnlyOnServer []syncTodoReply   `json:"todo_replies_only_on_server"`
+	TodoListsServerNewer    []syncTodoList    `json:"todo_lists_server_newer"`
+	TodoListsOnlyOnServer   []syncTodoList    `json:"todo_lists_only_on_server"`
+	AITaskRunsServerNewer   []syncResponseRun `json:"ai_task_runs_server_newer"`
+	AITaskRunsOnlyOnServer  []syncResponseRun `json:"ai_task_runs_only_on_server"`
+	AITaskEventsAccepted    []string          `json:"ai_task_events_accepted"`
+	AITaskEventsDuplicate   []string          `json:"ai_task_events_duplicate"`
+	AITaskEventsRejected    []syncEventReject `json:"ai_task_events_rejected"`
 }
 
 type syncResponseRun struct {
@@ -289,6 +307,9 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 	if len(batch.Todos) > 0 {
 		models = append(models, "todos")
 	}
+	if len(batch.TodoReplies) > 0 {
+		models = append(models, "todo_replies")
+	}
 	if len(batch.AITaskRuns) > 0 {
 		models = append(models, "ai_task_runs")
 	}
@@ -296,7 +317,7 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 		models = append(models, "ai_task_events")
 	}
 	if len(models) == 0 {
-		models = []string{"status_logs", "todo_lists", "todos", "ai_task_runs", "ai_task_events"}
+		models = []string{"status_logs", "todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events"}
 	}
 	lastSyncAtByModel := map[string]*string{}
 	for _, model := range models {
@@ -333,6 +354,11 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 	todos := make([]syncTodo, 0, len(batch.Todos))
 	for _, todo := range batch.Todos {
 		todos = append(todos, todoToSync(todo))
+	}
+
+	replies := make([]syncTodoReply, 0, len(batch.TodoReplies))
+	for _, reply := range batch.TodoReplies {
+		replies = append(replies, todoReplyToSync(reply))
 	}
 
 	runs := make([]syncAITaskRun, 0, len(batch.AITaskRuns))
@@ -398,6 +424,7 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 		GoalMilestones:    []any{},
 		GoalCheckins:      []any{},
 		Todos:             todos,
+		TodoReplies:       replies,
 		TodoLists:         todoLists,
 		Events:            []any{},
 		Pomodoros:         []any{},
@@ -420,16 +447,18 @@ func buildSyncAck(batch SyncBatch, resp syncResponse, detail string) SyncAck {
 		runConflicts[run.UUID] = true
 	}
 	ack := SyncAck{
-		StatusLogUUIDs:     make([]string, 0, len(batch.StatusLogs)),
-		TodoSynced:         []string{},
-		TodoServerRecords:  []TodoRecord{},
-		TodoListSynced:     []string{},
-		TodoListServerRows: []TodoListRecord{},
-		AITaskRunSynced:    []string{},
-		AITaskEventSynced:  []string{},
-		AITaskEventErrors:  map[string]string{},
-		ServerTime:         serverTime,
-		Detail:             detail,
+		StatusLogUUIDs:      make([]string, 0, len(batch.StatusLogs)),
+		TodoSynced:          []string{},
+		TodoServerRecords:   []TodoRecord{},
+		TodoReplySynced:     []string{},
+		TodoReplyServerRows: []TodoReplyRecord{},
+		TodoListSynced:      []string{},
+		TodoListServerRows:  []TodoListRecord{},
+		AITaskRunSynced:     []string{},
+		AITaskEventSynced:   []string{},
+		AITaskEventErrors:   map[string]string{},
+		ServerTime:          serverTime,
+		Detail:              detail,
 	}
 	for _, record := range batch.StatusLogs {
 		ack.StatusLogUUIDs = append(ack.StatusLogUUIDs, record.UUID)
@@ -480,6 +509,30 @@ func buildSyncAck(batch SyncBatch, resp syncResponse, detail string) SyncAck {
 	for _, todo := range batch.Todos {
 		if !todoConflicts[todo.UUID] {
 			ack.TodoSynced = append(ack.TodoSynced, todo.UUID)
+		}
+	}
+
+	pendingReplies := map[string]bool{}
+	for _, reply := range batch.TodoReplies {
+		pendingReplies[reply.UUID] = true
+	}
+	replyConflicts := map[string]bool{}
+	for _, reply := range resp.TodoRepliesServerNewer {
+		if pendingReplies[reply.UUID] {
+			replyConflicts[reply.UUID] = true
+			ack.TodoReplyConflicts = append(ack.TodoReplyConflicts, reply.UUID)
+			continue
+		}
+		ack.TodoReplyServerRows = append(ack.TodoReplyServerRows, todoReplyFromSync(reply, serverTime))
+	}
+	for _, reply := range resp.TodoRepliesOnlyOnServer {
+		if !pendingReplies[reply.UUID] {
+			ack.TodoReplyServerRows = append(ack.TodoReplyServerRows, todoReplyFromSync(reply, serverTime))
+		}
+	}
+	for _, reply := range batch.TodoReplies {
+		if !replyConflicts[reply.UUID] {
+			ack.TodoReplySynced = append(ack.TodoReplySynced, reply.UUID)
 		}
 	}
 
@@ -571,6 +624,42 @@ func todoFromSync(todo syncTodo, syncedAt time.Time) TodoRecord {
 		ClientCreatedAt:     createdAt,
 		ClientUpdatedAt:     updatedAt,
 		SyncedAt:            &syncedAt,
+	}
+}
+
+func todoReplyToSync(reply TodoReplyRecord) syncTodoReply {
+	return syncTodoReply{
+		CreatedAt:        reply.ClientCreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:        reply.ClientUpdatedAt.UTC().Format(time.RFC3339Nano),
+		UserID:           0,
+		BookID:           0,
+		UUID:             reply.UUID,
+		TodoUUID:         reply.TodoUUID,
+		DeletedAt:        timePtrString(reply.DeletedAt),
+		ActorUserID:      0,
+		SourceType:       defaultString(reply.SourceType, "api_token"),
+		SourceName:       reply.SourceName,
+		ActorDisplayName: reply.ActorDisplayName,
+		Content:          reply.Content,
+	}
+}
+
+func todoReplyFromSync(reply syncTodoReply, syncedAt time.Time) TodoReplyRecord {
+	createdAt := parseSyncTimeOrNow(reply.CreatedAt, syncedAt)
+	updatedAt := parseSyncTimeOrNow(reply.UpdatedAt, syncedAt)
+	return TodoReplyRecord{
+		UUID:             reply.UUID,
+		TodoUUID:         reply.TodoUUID,
+		Content:          reply.Content,
+		DeletedAt:        parseSyncTimePtr(reply.DeletedAt),
+		SourceType:       reply.SourceType,
+		SourceName:       reply.SourceName,
+		ActorDisplayName: reply.ActorDisplayName,
+		CreatedAt:        createdAt,
+		UpdatedAt:        updatedAt,
+		ClientCreatedAt:  createdAt,
+		ClientUpdatedAt:  updatedAt,
+		SyncedAt:         &syncedAt,
 	}
 }
 

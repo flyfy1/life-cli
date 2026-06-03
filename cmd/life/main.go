@@ -295,6 +295,44 @@ func cmdTodo(ctx context.Context, service *integlife.Service, args []string) err
 		}
 		printTodoResult(result, *jsonOut)
 		return nil
+	case "reply":
+		fs := flag.NewFlagSet("life todo reply", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		source := fs.String("source", "life-cli", "source name")
+		actor := fs.String("actor", "CLI", "actor display name")
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], []string{"source", "actor"}, []string{"json"})
+		if err != nil {
+			return err
+		}
+		if len(positionals) < 2 {
+			return errors.New("usage: life todo reply <uuid-or-prefix> <content>")
+		}
+		content := strings.TrimSpace(strings.Join(positionals[1:], " "))
+		result, err := service.AddTodoReply(ctx, positionals[0], content, *source, *actor)
+		if err != nil {
+			return err
+		}
+		printTodoReplyResult(result, *jsonOut)
+		return nil
+	case "replies":
+		fs := flag.NewFlagSet("life todo replies", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		all := fs.Bool("all", false, "include deleted replies")
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], nil, []string{"all", "json"})
+		if err != nil {
+			return err
+		}
+		if len(positionals) != 1 {
+			return errors.New("usage: life todo replies <uuid-or-prefix>")
+		}
+		todo, replies, err := service.ListTodoReplies(positionals[0], *all)
+		if err != nil {
+			return err
+		}
+		printTodoReplies(todo, replies, *jsonOut)
+		return nil
 	case "delete":
 		fs := flag.NewFlagSet("life todo delete", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
@@ -876,6 +914,54 @@ func printTodoListResult(result integlife.TodoListCommandResult, jsonOut bool) {
 	}
 }
 
+func printTodoReplyResult(result integlife.TodoReplyCommandResult, jsonOut bool) {
+	if jsonOut {
+		printJSON(todoReplyJSON(result.Reply))
+		return
+	}
+	fmt.Printf("reply: %s todo=%s\n", result.Reply.UUID, result.Todo.UUID)
+	fmt.Printf("content: %s\n", result.Reply.Content)
+	if result.Synced {
+		fmt.Printf("sync ok: %s\n", result.SyncDetail)
+	} else if result.SyncDetail != "" {
+		fmt.Printf("sync skipped: %s\n", result.SyncDetail)
+	}
+}
+
+func printTodoReplies(todo integlife.TodoRecord, replies []integlife.TodoReplyRecord, jsonOut bool) {
+	if jsonOut {
+		out := make([]map[string]any, 0, len(replies))
+		for _, reply := range replies {
+			out = append(out, todoReplyJSON(reply))
+		}
+		printJSON(out)
+		return
+	}
+	if len(replies) == 0 {
+		fmt.Printf("no replies for %s\n", todo.UUID)
+		return
+	}
+	fmt.Printf("todo: %s %s\n", todo.UUID, todo.Content)
+	for _, reply := range replies {
+		state := ""
+		if reply.DeletedAt != nil {
+			state = " [deleted]"
+		}
+		syncSuffix := ""
+		if reply.LastSyncError != "" {
+			syncSuffix = " sync_error=" + reply.LastSyncError
+		}
+		author := reply.ActorDisplayName
+		if author == "" {
+			author = reply.SourceName
+		}
+		if author == "" {
+			author = "unknown"
+		}
+		fmt.Printf("%s%s %s: %s%s\n", shortID(reply.UUID), state, author, reply.Content, syncSuffix)
+	}
+}
+
 func printTodoLists(lists []integlife.TodoListRecord, jsonOut bool) {
 	if jsonOut {
 		out := make([]map[string]any, 0, len(lists))
@@ -931,6 +1017,21 @@ func todoListJSON(list integlife.TodoListRecord) map[string]any {
 		"deleted_at":      formatTimePtr(list.DeletedAt),
 		"updated_at":      list.ClientUpdatedAt.Format(time.RFC3339Nano),
 		"last_sync_error": list.LastSyncError,
+	}
+}
+
+func todoReplyJSON(reply integlife.TodoReplyRecord) map[string]any {
+	return map[string]any{
+		"uuid":               reply.UUID,
+		"todo_uuid":          reply.TodoUUID,
+		"content":            reply.Content,
+		"deleted_at":         formatTimePtr(reply.DeletedAt),
+		"source_type":        reply.SourceType,
+		"source_name":        reply.SourceName,
+		"actor_display_name": reply.ActorDisplayName,
+		"created_at":         reply.ClientCreatedAt.Format(time.RFC3339Nano),
+		"updated_at":         reply.ClientUpdatedAt.Format(time.RFC3339Nano),
+		"last_sync_error":    reply.LastSyncError,
 	}
 }
 
@@ -1046,6 +1147,8 @@ func printTodoUsage(out *os.File) {
   life todo show <uuid-or-prefix> [--json]
   life todo update <uuid-or-prefix> [--content <text>] [--notes <text>] [--list <list>] [--clear-list] [--order <n>] [--done|--open]
   life todo done <uuid-or-prefix> [--undo]
+  life todo reply <uuid-or-prefix> [--source <name>] [--actor <name>] <content>
+  life todo replies <uuid-or-prefix> [--all] [--json]
   life todo delete <uuid-or-prefix>
 `)
 }

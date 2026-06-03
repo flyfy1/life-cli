@@ -95,10 +95,10 @@ func TestStoreMigratesOldStatusLogsSchema(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read user_version error = %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("user_version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("user_version = %d, want 4", version)
 	}
-	for _, table := range []string{"todo_lists", "todos", "ai_task_runs", "ai_task_events", "active_ai_runs", "sync_cursors"} {
+	for _, table := range []string{"todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events", "active_ai_runs", "sync_cursors"} {
 		var name string
 		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name); err != nil {
 			t.Fatalf("missing table %s: %v", table, err)
@@ -228,6 +228,50 @@ func TestTodoListFollowsParentLocally(t *testing.T) {
 	}
 	if updatedChild.ListUUID != newList.List.UUID {
 		t.Fatalf("child override list uuid = %s, want parent list %s", updatedChild.ListUUID, newList.List.UUID)
+	}
+}
+
+func TestTodoReplyLocalWrites(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "integlife.db"))
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	service := NewService(store, NewClient("", "", time.Second))
+	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	todoResult, err := service.AddTodo(testContext(), "Write reply-capable CLI", "", "", 0)
+	if err != nil {
+		t.Fatalf("AddTodo() error = %v", err)
+	}
+	now = now.Add(time.Minute)
+	replyResult, err := service.AddTodoReply(testContext(), todoResult.Todo.UUID[:8], "Implemented todo reply support.", "Codex", "Codex")
+	if err != nil {
+		t.Fatalf("AddTodoReply() error = %v", err)
+	}
+	if replyResult.Reply.TodoUUID != todoResult.Todo.UUID {
+		t.Fatalf("reply todo uuid = %s, want %s", replyResult.Reply.TodoUUID, todoResult.Todo.UUID)
+	}
+	if replyResult.Reply.SourceName != "Codex" || replyResult.Reply.ActorDisplayName != "Codex" {
+		t.Fatalf("reply source/actor = %q/%q, want Codex/Codex", replyResult.Reply.SourceName, replyResult.Reply.ActorDisplayName)
+	}
+
+	_, replies, err := service.ListTodoReplies(todoResult.Todo.UUID, false)
+	if err != nil {
+		t.Fatalf("ListTodoReplies() error = %v", err)
+	}
+	if len(replies) != 1 || replies[0].Content != "Implemented todo reply support." {
+		t.Fatalf("replies = %#v, want one reply", replies)
+	}
+
+	pending, err := store.PendingTodoReplies()
+	if err != nil {
+		t.Fatalf("PendingTodoReplies() error = %v", err)
+	}
+	if len(pending) != 1 || pending[0].UUID != replyResult.Reply.UUID {
+		t.Fatalf("pending replies = %#v, want created reply", pending)
 	}
 }
 

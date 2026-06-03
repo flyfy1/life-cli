@@ -57,6 +57,22 @@ type TodoListRecord struct {
 	LastSyncError   string
 }
 
+type TodoReplyRecord struct {
+	UUID             string
+	TodoUUID         string
+	Content          string
+	DeletedAt        *time.Time
+	SourceType       string
+	SourceName       string
+	ActorDisplayName string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ClientCreatedAt  time.Time
+	ClientUpdatedAt  time.Time
+	SyncedAt         *time.Time
+	LastSyncError    string
+}
+
 type SyncFailure struct {
 	UUID   string
 	Detail string
@@ -134,23 +150,27 @@ type SyncBatch struct {
 	StatusLogs   []Record
 	Todos        []TodoRecord
 	TodoLists    []TodoListRecord
+	TodoReplies  []TodoReplyRecord
 	AITaskRuns   []AITaskRunRecord
 	AITaskEvents []AITaskEventRecord
 	Cursors      map[string]time.Time
 }
 
 type SyncAck struct {
-	StatusLogUUIDs     []string
-	TodoSynced         []string
-	TodoConflicts      []string
-	TodoServerRecords  []TodoRecord
-	TodoListSynced     []string
-	TodoListConflicts  []string
-	TodoListServerRows []TodoListRecord
-	AITaskRunSynced    []string
-	AITaskRunConflicts []string
-	AITaskEventSynced  []string
-	AITaskEventErrors  map[string]string
-	ServerTime         time.Time
-	Detail             string
+	StatusLogUUIDs      []string
+	TodoSynced          []string
+	TodoConflicts       []string
+	TodoServerRecords   []TodoRecord
+	TodoReplySynced     []string
+	TodoReplyConflicts  []string
+	TodoReplyServerRows []TodoReplyRecord
+	TodoListSynced      []string
+	TodoListConflicts   []string
+	TodoListServerRows  []TodoListRecord
+	AITaskRunSynced     []string
+	AITaskRunConflicts  []string
+	AITaskEventSynced   []string
+	AITaskEventErrors   map[string]string
+	ServerTime          time.Time
+	Detail              string
 }

@@ -87,7 +87,7 @@ func migrateSchema(tx *sql.Tx) error {
 		if err := initSyncCursors(tx, time.Now().UTC()); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`PRAGMA user_version = 3`); err != nil {
+		if _, err := tx.Exec(`PRAGMA user_version = 4`); err != nil {
 			return fmt.Errorf("set schema version: %w", err)
 		}
 		return nil
@@ -102,8 +102,8 @@ func migrateSchema(tx *sql.Tx) error {
 	if err := initSyncCursors(tx, time.Now().UTC()); err != nil {
 		return err
 	}
-	if version < 3 {
-		if _, err := tx.Exec(`PRAGMA user_version = 3`); err != nil {
+	if version < 4 {
+		if _, err := tx.Exec(`PRAGMA user_version = 4`); err != nil {
 			return fmt.Errorf("set schema version: %w", err)
 		}
 	}
@@ -196,6 +196,10 @@ func (s *Store) PendingSyncBatch() (SyncBatch, error) {
 	if err != nil {
 		return SyncBatch{}, err
 	}
+	replies, err := s.PendingTodoReplies()
+	if err != nil {
+		return SyncBatch{}, err
+	}
 	cursors, err := s.SyncCursors()
 	if err != nil {
 		return SyncBatch{}, err
@@ -204,6 +208,7 @@ func (s *Store) PendingSyncBatch() (SyncBatch, error) {
 		StatusLogs:   statusLogs,
 		TodoLists:    todoLists,
 		Todos:        todos,
+		TodoReplies:  replies,
 		AITaskRuns:   runs,
 		AITaskEvents: events,
 		Cursors:      cursors,
@@ -517,6 +522,99 @@ func (s *Store) MarkTodoListSyncError(uuid, detail string) error {
 	_, err := s.db.Exec(`UPDATE todo_lists SET last_sync_error = ? WHERE uuid = ?`, detail, uuid)
 	if err != nil {
 		return fmt.Errorf("mark todo list sync error: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) SaveTodoReply(reply TodoReplyRecord) error {
+	_, err := s.db.Exec(`
+		INSERT INTO todo_replies (
+			uuid, todo_uuid, content, deleted_at, source_type, source_name,
+			actor_display_name, created_at, updated_at, client_created_at,
+			client_updated_at, synced_at, last_sync_error
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(uuid) DO UPDATE SET
+			todo_uuid = excluded.todo_uuid,
+			content = excluded.content,
+			deleted_at = excluded.deleted_at,
+			source_type = excluded.source_type,
+			source_name = excluded.source_name,
+			actor_display_name = excluded.actor_display_name,
+			updated_at = excluded.updated_at,
+			client_updated_at = excluded.client_updated_at,
+			synced_at = excluded.synced_at,
+			last_sync_error = excluded.last_sync_error
+	`, reply.UUID, reply.TodoUUID, reply.Content, formatNullTime(reply.DeletedAt), reply.SourceType, reply.SourceName,
+		reply.ActorDisplayName, formatTime(reply.CreatedAt), formatTime(reply.UpdatedAt), formatTime(reply.ClientCreatedAt),
+		formatTime(reply.ClientUpdatedAt), formatNullTime(reply.SyncedAt), reply.LastSyncError)
+	if err != nil {
+		return fmt.Errorf("save todo reply: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListTodoReplies(todoUUID string, includeDeleted bool) ([]TodoReplyRecord, error) {
+	query := todoReplySelectSQL() + ` WHERE todo_uuid = ?`
+	args := []any{todoUUID}
+	if !includeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+	query += ` ORDER BY client_created_at ASC, uuid ASC`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list todo replies: %w", err)
+	}
+	defer rows.Close()
+	var replies []TodoReplyRecord
+	for rows.Next() {
+		reply, err := scanTodoReply(rows)
+		if err != nil {
+			return nil, err
+		}
+		replies = append(replies, reply)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate todo replies: %w", err)
+	}
+	return replies, nil
+}
+
+func (s *Store) PendingTodoReplies() ([]TodoReplyRecord, error) {
+	rows, err := s.db.Query(todoReplySelectSQL() + `
+		WHERE synced_at IS NULL
+		ORDER BY client_updated_at ASC, client_created_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query pending todo replies: %w", err)
+	}
+	defer rows.Close()
+	var replies []TodoReplyRecord
+	for rows.Next() {
+		reply, err := scanTodoReply(rows)
+		if err != nil {
+			return nil, err
+		}
+		replies = append(replies, reply)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending todo replies: %w", err)
+	}
+	return replies, nil
+}
+
+func (s *Store) MarkTodoReplySynced(uuid string, syncedAt time.Time) error {
+	_, err := s.db.Exec(`UPDATE todo_replies SET synced_at = ?, last_sync_error = '' WHERE uuid = ?`, formatTime(syncedAt), uuid)
+	if err != nil {
+		return fmt.Errorf("mark todo reply synced: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) MarkTodoReplySyncError(uuid, detail string) error {
+	_, err := s.db.Exec(`UPDATE todo_replies SET last_sync_error = ? WHERE uuid = ?`, detail, uuid)
+	if err != nil {
+		return fmt.Errorf("mark todo reply sync error: %w", err)
 	}
 	return nil
 }
@@ -964,6 +1062,41 @@ func scanTodoList(scanner interface {
 	return list, nil
 }
 
+func scanTodoReply(scanner interface {
+	Scan(dest ...any) error
+}) (TodoReplyRecord, error) {
+	var reply TodoReplyRecord
+	var deletedAt, syncedAt sql.NullString
+	var createdAt, updatedAt, clientCreatedAt, clientUpdatedAt string
+	if err := scanner.Scan(
+		&reply.UUID, &reply.TodoUUID, &reply.Content, &deletedAt, &reply.SourceType, &reply.SourceName,
+		&reply.ActorDisplayName, &createdAt, &updatedAt, &clientCreatedAt, &clientUpdatedAt,
+		&syncedAt, &reply.LastSyncError,
+	); err != nil {
+		return TodoReplyRecord{}, err
+	}
+	var err error
+	if reply.DeletedAt, err = parseNullTime(deletedAt); err != nil {
+		return TodoReplyRecord{}, fmt.Errorf("parse deleted_at: %w", err)
+	}
+	if reply.SyncedAt, err = parseNullTime(syncedAt); err != nil {
+		return TodoReplyRecord{}, fmt.Errorf("parse synced_at: %w", err)
+	}
+	if reply.CreatedAt, err = parseTime(createdAt); err != nil {
+		return TodoReplyRecord{}, fmt.Errorf("parse created_at: %w", err)
+	}
+	if reply.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return TodoReplyRecord{}, fmt.Errorf("parse updated_at: %w", err)
+	}
+	if reply.ClientCreatedAt, err = parseTime(clientCreatedAt); err != nil {
+		return TodoReplyRecord{}, fmt.Errorf("parse client_created_at: %w", err)
+	}
+	if reply.ClientUpdatedAt, err = parseTime(clientUpdatedAt); err != nil {
+		return TodoReplyRecord{}, fmt.Errorf("parse client_updated_at: %w", err)
+	}
+	return reply, nil
+}
+
 func todoSelectSQL() string {
 	return `SELECT uuid, parent_uuid, content, notes, completed, sort_order, list_uuid,
 		completed_at, deleted_at, archived_at, deadline, goal_uuid, milestone_uuid,
@@ -977,6 +1110,13 @@ func todoListSelectSQL() string {
 	return `SELECT uuid, name, color, icon, sort_order, deleted_at, created_at, updated_at,
 		client_created_at, client_updated_at, synced_at, last_sync_error
 		FROM todo_lists`
+}
+
+func todoReplySelectSQL() string {
+	return `SELECT uuid, todo_uuid, content, deleted_at, source_type, source_name,
+		actor_display_name, created_at, updated_at, client_created_at,
+		client_updated_at, synced_at, last_sync_error
+		FROM todo_replies`
 }
 
 func formatNullTime(value *time.Time) any {
@@ -1035,6 +1175,23 @@ func createTodoSchema(tx *sql.Tx) error {
 		`CREATE INDEX IF NOT EXISTS idx_todos_active_order ON todos(deleted_at, completed, sort_order, client_created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_todos_list ON todos(list_uuid, deleted_at, completed, sort_order)`,
 		`CREATE INDEX IF NOT EXISTS idx_todos_pending ON todos(synced_at, client_updated_at)`,
+		`CREATE TABLE IF NOT EXISTS todo_replies (
+			uuid TEXT PRIMARY KEY,
+			todo_uuid TEXT NOT NULL,
+			content TEXT NOT NULL,
+			deleted_at TEXT,
+			source_type TEXT NOT NULL DEFAULT '',
+			source_name TEXT NOT NULL DEFAULT '',
+			actor_display_name TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			client_created_at TEXT NOT NULL,
+			client_updated_at TEXT NOT NULL,
+			synced_at TEXT,
+			last_sync_error TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_todo_replies_todo_created ON todo_replies(todo_uuid, deleted_at, client_created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_todo_replies_pending ON todo_replies(synced_at, client_updated_at)`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.Exec(statement); err != nil {
