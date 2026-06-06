@@ -62,6 +62,31 @@ type TodoCommandResult struct {
 	SyncDetail string
 }
 
+type AddTodoOptions struct {
+	Content       string
+	Notes         string
+	ListRef       string
+	ParentRef     string
+	Order         float64
+	Deadline      *time.Time
+	GoalUUID      string
+	MilestoneUUID string
+}
+
+type TodoListOptions struct {
+	IncludeDeleted  bool
+	CompletedFilter *bool
+	ListRef         string
+	ParentRef       string
+	ParentFilter    bool
+	RootOnly        bool
+	GoalUUID        string
+	MilestoneUUID   string
+	DeadlineBefore  *time.Time
+	DeadlineAfter   *time.Time
+	Search          string
+}
+
 type TodoListCommandResult struct {
 	List       TodoListRecord
 	Synced     bool
@@ -84,21 +109,39 @@ func NewService(store *Store, client *Client) *Service {
 }
 
 func (s *Service) AddTodo(ctx context.Context, content, notes, listRef string, order float64) (TodoCommandResult, error) {
+	return s.AddTodoWithOptions(ctx, AddTodoOptions{
+		Content: content,
+		Notes:   notes,
+		ListRef: listRef,
+		Order:   order,
+	})
+}
+
+func (s *Service) AddTodoWithOptions(ctx context.Context, opts AddTodoOptions) (TodoCommandResult, error) {
+	content := strings.TrimSpace(opts.Content)
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return TodoCommandResult{}, fmt.Errorf("content must be non-empty")
 	}
-	listUUID, err := s.resolveOptionalListUUID(listRef)
+	listUUID, err := s.resolveOptionalListUUID(opts.ListRef)
 	if err != nil {
 		return TodoCommandResult{}, err
+	}
+	parentUUID, err := s.resolveOptionalTodoUUID(opts.ParentRef)
+	if err != nil {
+		return TodoCommandResult{}, fmt.Errorf("resolve parent: %w", err)
 	}
 	now := s.now().UTC()
 	todo := TodoRecord{
 		UUID:               newUUID(),
+		ParentUUID:         parentUUID,
 		Content:            content,
-		Notes:              notes,
-		SortOrder:          order,
+		Notes:              opts.Notes,
+		SortOrder:          opts.Order,
 		ListUUID:           listUUID,
+		Deadline:           opts.Deadline,
+		GoalUUID:           strings.TrimSpace(opts.GoalUUID),
+		MilestoneUUID:      strings.TrimSpace(opts.MilestoneUUID),
 		CompletionMode:     "manual",
 		CompletionSource:   "manual",
 		AIEvaluationStatus: "not_requested",
@@ -106,6 +149,9 @@ func (s *Service) AddTodo(ctx context.Context, content, notes, listRef string, o
 		UpdatedAt:          now,
 		ClientCreatedAt:    now,
 		ClientUpdatedAt:    now,
+	}
+	if err := s.inheritParentTodoList(&todo); err != nil {
+		return TodoCommandResult{}, err
 	}
 	if err := s.store.SaveTodo(todo); err != nil {
 		return TodoCommandResult{}, err
@@ -171,15 +217,43 @@ func (s *Service) Todo(ref string) (TodoRecord, error) {
 }
 
 func (s *Service) ListTodos(includeDeleted bool, completedFilter *bool, listRef string) ([]TodoRecord, error) {
+	return s.ListTodosWithOptions(TodoListOptions{
+		IncludeDeleted:  includeDeleted,
+		CompletedFilter: completedFilter,
+		ListRef:         listRef,
+	})
+}
+
+func (s *Service) ListTodosWithOptions(opts TodoListOptions) ([]TodoRecord, error) {
 	listUUID := ""
-	if strings.TrimSpace(listRef) != "" {
+	if strings.TrimSpace(opts.ListRef) != "" {
 		var err error
-		listUUID, err = s.resolveOptionalListUUID(listRef)
+		listUUID, err = s.resolveOptionalListUUID(opts.ListRef)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return s.store.ListTodos(includeDeleted, completedFilter, listUUID)
+	parentUUID := ""
+	if opts.ParentFilter {
+		resolved, err := s.resolveOptionalTodoUUID(opts.ParentRef)
+		if err != nil {
+			return nil, fmt.Errorf("resolve parent: %w", err)
+		}
+		parentUUID = resolved
+	}
+	return s.store.ListTodosByQuery(TodoQuery{
+		IncludeDeleted:  opts.IncludeDeleted,
+		CompletedFilter: opts.CompletedFilter,
+		ListUUID:        listUUID,
+		ParentUUID:      parentUUID,
+		ParentFilter:    opts.ParentFilter,
+		RootOnly:        opts.RootOnly,
+		GoalUUID:        strings.TrimSpace(opts.GoalUUID),
+		MilestoneUUID:   strings.TrimSpace(opts.MilestoneUUID),
+		DeadlineBefore:  opts.DeadlineBefore,
+		DeadlineAfter:   opts.DeadlineAfter,
+		Search:          strings.TrimSpace(opts.Search),
+	})
 }
 
 func (s *Service) AddTodoList(ctx context.Context, name, color, icon string, order int) (TodoListCommandResult, error) {
@@ -302,9 +376,53 @@ func (s *Service) resolveOptionalListUUID(ref string) (string, error) {
 	return list.UUID, nil
 }
 
+func (s *Service) resolveOptionalTodoUUID(ref string) (string, error) {
+	if strings.TrimSpace(ref) == "" {
+		return "", nil
+	}
+	todo, err := s.store.ResolveTodo(ref)
+	if err != nil {
+		return "", err
+	}
+	return todo.UUID, nil
+}
+
+func (s *Service) ResolveTodoUUID(ref string) (string, error) {
+	return s.resolveOptionalTodoUUID(ref)
+}
+
+func (s *Service) ValidateTodoParent(todo TodoRecord) error {
+	parentUUID := strings.TrimSpace(todo.ParentUUID)
+	if parentUUID == "" {
+		return nil
+	}
+	if parentUUID == todo.UUID {
+		return fmt.Errorf("todo cannot be its own parent")
+	}
+	seen := map[string]bool{todo.UUID: true}
+	for parentUUID != "" {
+		if seen[parentUUID] {
+			return fmt.Errorf("todo parent cycle detected")
+		}
+		seen[parentUUID] = true
+		parent, err := s.store.Todo(parentUUID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		parentUUID = strings.TrimSpace(parent.ParentUUID)
+	}
+	return nil
+}
+
 func (s *Service) inheritParentTodoList(todo *TodoRecord) error {
 	if strings.TrimSpace(todo.ParentUUID) == "" {
 		return nil
+	}
+	if err := s.ValidateTodoParent(*todo); err != nil {
+		return err
 	}
 	parent, err := s.store.Todo(todo.ParentUUID)
 	if errors.Is(err, sql.ErrNoRows) {

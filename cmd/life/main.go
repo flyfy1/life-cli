@@ -157,14 +157,31 @@ func cmdTodo(ctx context.Context, service *integlife.Service, args []string) err
 		fs.SetOutput(os.Stderr)
 		notes := fs.String("notes", "", "todo notes")
 		listRef := fs.String("list", "", "list uuid, prefix, or name")
+		parentRef := fs.String("parent", "", "parent todo uuid or prefix")
+		deadline := fs.String("deadline", "", "deadline as RFC3339 or YYYY-MM-DD")
+		goal := fs.String("goal", "", "goal uuid")
+		milestone := fs.String("milestone", "", "milestone uuid")
 		order := fs.Float64("order", 0, "sort order")
 		jsonOut := fs.Bool("json", false, "print json")
-		positionals, err := parseCommandFlags(fs, args[1:], []string{"notes", "list", "order"}, []string{"json"})
+		positionals, err := parseCommandFlags(fs, args[1:], []string{"notes", "list", "parent", "deadline", "goal", "milestone", "order"}, []string{"json"})
 		if err != nil {
 			return err
 		}
 		content := strings.TrimSpace(strings.Join(positionals, " "))
-		result, err := service.AddTodo(ctx, content, *notes, *listRef, *order)
+		parsedDeadline, err := parseOptionalTimeFlag(*deadline)
+		if err != nil {
+			return err
+		}
+		result, err := service.AddTodoWithOptions(ctx, integlife.AddTodoOptions{
+			Content:       content,
+			Notes:         *notes,
+			ListRef:       *listRef,
+			ParentRef:     *parentRef,
+			Order:         *order,
+			Deadline:      parsedDeadline,
+			GoalUUID:      *goal,
+			MilestoneUUID: *milestone,
+		})
 		if err != nil {
 			return err
 		}
@@ -177,8 +194,14 @@ func cmdTodo(ctx context.Context, service *integlife.Service, args []string) err
 		done := fs.Bool("done", false, "show completed todos")
 		open := fs.Bool("open", false, "show open todos")
 		listRef := fs.String("list", "", "list uuid, prefix, or name")
+		parentRef := fs.String("parent", "", "parent todo uuid or prefix")
+		rootOnly := fs.Bool("root", false, "show root todos only")
+		goal := fs.String("goal", "", "goal uuid")
+		milestone := fs.String("milestone", "", "milestone uuid")
+		due := fs.String("due", "", "deadline filter: today, week, overdue")
+		search := fs.String("search", "", "content or notes search")
 		jsonOut := fs.Bool("json", false, "print json")
-		if _, err := parseCommandFlags(fs, args[1:], []string{"list"}, []string{"all", "done", "open", "json"}); err != nil {
+		if _, err := parseCommandFlags(fs, args[1:], []string{"list", "parent", "goal", "milestone", "due", "search"}, []string{"all", "done", "open", "root", "json"}); err != nil {
 			return err
 		}
 		if *done && *open {
@@ -189,11 +212,78 @@ func cmdTodo(ctx context.Context, service *integlife.Service, args []string) err
 			value := *done
 			completedFilter = &value
 		}
-		todos, err := service.ListTodos(*all, completedFilter, *listRef)
+		deadlineAfter, deadlineBefore, err := deadlineRange(*due, time.Now())
+		if err != nil {
+			return err
+		}
+		todos, err := service.ListTodosWithOptions(integlife.TodoListOptions{
+			IncludeDeleted:  *all,
+			CompletedFilter: completedFilter,
+			ListRef:         *listRef,
+			ParentRef:       *parentRef,
+			ParentFilter:    flagProvided(fs, "parent"),
+			RootOnly:        *rootOnly,
+			GoalUUID:        *goal,
+			MilestoneUUID:   *milestone,
+			DeadlineAfter:   deadlineAfter,
+			DeadlineBefore:  deadlineBefore,
+			Search:          *search,
+		})
 		if err != nil {
 			return err
 		}
 		printTodoList(todos, *jsonOut)
+		return nil
+	case "tree":
+		fs := flag.NewFlagSet("life todo tree", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		all := fs.Bool("all", false, "include deleted and archived todos")
+		done := fs.Bool("done", false, "show completed todos")
+		open := fs.Bool("open", false, "show open todos")
+		listRef := fs.String("list", "", "list uuid, prefix, or name")
+		parentRef := fs.String("parent", "", "parent todo uuid or prefix")
+		rootOnly := fs.Bool("root", false, "show root todos only")
+		goal := fs.String("goal", "", "goal uuid")
+		milestone := fs.String("milestone", "", "milestone uuid")
+		due := fs.String("due", "", "deadline filter: today, week, overdue")
+		search := fs.String("search", "", "content or notes search")
+		jsonOut := fs.Bool("json", false, "print json")
+		if _, err := parseCommandFlags(fs, args[1:], []string{"list", "parent", "goal", "milestone", "due", "search"}, []string{"all", "done", "open", "root", "json"}); err != nil {
+			return err
+		}
+		if *done && *open {
+			return errors.New("--done and --open cannot be used together")
+		}
+		var completedFilter *bool
+		if *done || *open {
+			value := *done
+			completedFilter = &value
+		}
+		deadlineAfter, deadlineBefore, err := deadlineRange(*due, time.Now())
+		if err != nil {
+			return err
+		}
+		todos, err := service.ListTodosWithOptions(integlife.TodoListOptions{
+			IncludeDeleted:  *all,
+			CompletedFilter: completedFilter,
+			ListRef:         *listRef,
+			ParentRef:       *parentRef,
+			ParentFilter:    flagProvided(fs, "parent"),
+			RootOnly:        *rootOnly,
+			GoalUUID:        *goal,
+			MilestoneUUID:   *milestone,
+			DeadlineAfter:   deadlineAfter,
+			DeadlineBefore:  deadlineBefore,
+			Search:          *search,
+		})
+		if err != nil {
+			return err
+		}
+		roots, err := buildTodoTree(service, todos)
+		if err != nil {
+			return err
+		}
+		printTodoTree(roots, *jsonOut)
 		return nil
 	case "show":
 		fs := flag.NewFlagSet("life todo show", flag.ContinueOnError)
@@ -219,11 +309,19 @@ func cmdTodo(ctx context.Context, service *integlife.Service, args []string) err
 		notes := fs.String("notes", "", "new notes")
 		listRef := fs.String("list", "", "list uuid, prefix, or name")
 		clearList := fs.Bool("clear-list", false, "remove todo from list")
+		parentRef := fs.String("parent", "", "parent todo uuid or prefix")
+		clearParent := fs.Bool("clear-parent", false, "remove todo parent")
+		deadline := fs.String("deadline", "", "deadline as RFC3339 or YYYY-MM-DD")
+		clearDeadline := fs.Bool("clear-deadline", false, "remove deadline")
+		goal := fs.String("goal", "", "goal uuid")
+		clearGoal := fs.Bool("clear-goal", false, "remove goal uuid")
+		milestone := fs.String("milestone", "", "milestone uuid")
+		clearMilestone := fs.Bool("clear-milestone", false, "remove milestone uuid")
 		order := fs.Float64("order", 0, "sort order")
 		done := fs.Bool("done", false, "mark completed")
 		open := fs.Bool("open", false, "mark open")
 		jsonOut := fs.Bool("json", false, "print json")
-		positionals, err := parseCommandFlags(fs, args[1:], []string{"content", "notes", "list", "order"}, []string{"clear-list", "done", "open", "json"})
+		positionals, err := parseCommandFlags(fs, args[1:], []string{"content", "notes", "list", "parent", "deadline", "goal", "milestone", "order"}, []string{"clear-list", "clear-parent", "clear-deadline", "clear-goal", "clear-milestone", "done", "open", "json"})
 		if err != nil {
 			return err
 		}
@@ -233,8 +331,27 @@ func cmdTodo(ctx context.Context, service *integlife.Service, args []string) err
 		if *done && *open {
 			return errors.New("--done and --open cannot be used together")
 		}
+		if flagProvided(fs, "parent") && *clearParent {
+			return errors.New("--parent and --clear-parent cannot be used together")
+		}
+		if flagProvided(fs, "deadline") && *clearDeadline {
+			return errors.New("--deadline and --clear-deadline cannot be used together")
+		}
+		if flagProvided(fs, "goal") && *clearGoal {
+			return errors.New("--goal and --clear-goal cannot be used together")
+		}
+		if flagProvided(fs, "milestone") && *clearMilestone {
+			return errors.New("--milestone and --clear-milestone cannot be used together")
+		}
+		parsedDeadline, err := parseOptionalTimeFlag(*deadline)
+		if err != nil {
+			return err
+		}
 		hasChange := flagProvided(fs, "content") || flagProvided(fs, "notes") || flagProvided(fs, "list") ||
-			flagProvided(fs, "clear-list") || flagProvided(fs, "order") || flagProvided(fs, "done") || flagProvided(fs, "open")
+			flagProvided(fs, "clear-list") || flagProvided(fs, "parent") || flagProvided(fs, "clear-parent") ||
+			flagProvided(fs, "deadline") || flagProvided(fs, "clear-deadline") || flagProvided(fs, "goal") ||
+			flagProvided(fs, "clear-goal") || flagProvided(fs, "milestone") || flagProvided(fs, "clear-milestone") ||
+			flagProvided(fs, "order") || flagProvided(fs, "done") || flagProvided(fs, "open")
 		if !hasChange {
 			return errors.New("todo update requires at least one field flag")
 		}
@@ -257,6 +374,34 @@ func cmdTodo(ctx context.Context, service *integlife.Service, args []string) err
 			}
 			if *clearList {
 				todo.ListUUID = ""
+			}
+			if flagProvided(fs, "parent") {
+				parentUUID, err := service.ResolveTodoUUID(*parentRef)
+				if err != nil {
+					return fmt.Errorf("resolve parent: %w", err)
+				}
+				todo.ParentUUID = parentUUID
+			}
+			if *clearParent {
+				todo.ParentUUID = ""
+			}
+			if flagProvided(fs, "deadline") {
+				todo.Deadline = parsedDeadline
+			}
+			if *clearDeadline {
+				todo.Deadline = nil
+			}
+			if flagProvided(fs, "goal") {
+				todo.GoalUUID = strings.TrimSpace(*goal)
+			}
+			if *clearGoal {
+				todo.GoalUUID = ""
+			}
+			if flagProvided(fs, "milestone") {
+				todo.MilestoneUUID = strings.TrimSpace(*milestone)
+			}
+			if *clearMilestone {
+				todo.MilestoneUUID = ""
 			}
 			if flagProvided(fs, "order") {
 				todo.SortOrder = *order
@@ -859,6 +1004,18 @@ func printTodo(todo integlife.TodoRecord, jsonOut bool) {
 	if todo.ListUUID != "" {
 		fmt.Printf("list: %s\n", todo.ListUUID)
 	}
+	if todo.ParentUUID != "" {
+		fmt.Printf("parent: %s\n", todo.ParentUUID)
+	}
+	if todo.Deadline != nil {
+		fmt.Printf("deadline: %s\n", todo.Deadline.UTC().Format(time.RFC3339Nano))
+	}
+	if todo.GoalUUID != "" {
+		fmt.Printf("goal: %s\n", todo.GoalUUID)
+	}
+	if todo.MilestoneUUID != "" {
+		fmt.Printf("milestone: %s\n", todo.MilestoneUUID)
+	}
 	if todo.LastSyncError != "" {
 		fmt.Printf("sync conflict/error: %s\n", todo.LastSyncError)
 	}
@@ -889,11 +1046,15 @@ func printTodoList(todos []integlife.TodoRecord, jsonOut bool) {
 		if todo.ListUUID != "" {
 			listSuffix = " list=" + todo.ListUUID
 		}
+		parentSuffix := ""
+		if todo.ParentUUID != "" {
+			parentSuffix = " parent=" + todo.ParentUUID
+		}
 		syncSuffix := ""
 		if todo.LastSyncError != "" {
 			syncSuffix = " sync_error=" + todo.LastSyncError
 		}
-		fmt.Printf("%s %s %s%s%s\n", shortID(todo.UUID), marker, todo.Content, listSuffix, syncSuffix)
+		fmt.Printf("%s %s %s%s%s%s\n", shortID(todo.UUID), marker, todo.Content, listSuffix, parentSuffix, syncSuffix)
 	}
 }
 
@@ -994,16 +1155,29 @@ func printTodoLists(lists []integlife.TodoListRecord, jsonOut bool) {
 
 func todoJSON(todo integlife.TodoRecord) map[string]any {
 	return map[string]any{
-		"uuid":            todo.UUID,
-		"content":         todo.Content,
-		"notes":           todo.Notes,
-		"completed":       todo.Completed,
-		"order":           todo.SortOrder,
-		"list_uuid":       todo.ListUUID,
-		"completed_at":    formatTimePtr(todo.CompletedAt),
-		"deleted_at":      formatTimePtr(todo.DeletedAt),
-		"updated_at":      todo.ClientUpdatedAt.Format(time.RFC3339Nano),
-		"last_sync_error": todo.LastSyncError,
+		"uuid":                  todo.UUID,
+		"parent_uuid":           todo.ParentUUID,
+		"content":               todo.Content,
+		"notes":                 todo.Notes,
+		"completed":             todo.Completed,
+		"order":                 todo.SortOrder,
+		"list_uuid":             todo.ListUUID,
+		"deadline":              formatTimePtr(todo.Deadline),
+		"goal_uuid":             todo.GoalUUID,
+		"milestone_uuid":        todo.MilestoneUUID,
+		"category_uuid":         todo.CategoryUUID,
+		"task_role":             todo.TaskRole,
+		"todo_source":           todo.TodoSource,
+		"completion_mode":       todo.CompletionMode,
+		"completion_source":     todo.CompletionSource,
+		"ai_evaluation_status":  todo.AIEvaluationStatus,
+		"ai_completion_summary": todo.AICompletionSummary,
+		"completed_at":          formatTimePtr(todo.CompletedAt),
+		"deleted_at":            formatTimePtr(todo.DeletedAt),
+		"archived_at":           formatTimePtr(todo.ArchivedAt),
+		"created_at":            todo.ClientCreatedAt.Format(time.RFC3339Nano),
+		"updated_at":            todo.ClientUpdatedAt.Format(time.RFC3339Nano),
+		"last_sync_error":       todo.LastSyncError,
 	}
 }
 
@@ -1035,11 +1209,167 @@ func todoReplyJSON(reply integlife.TodoReplyRecord) map[string]any {
 	}
 }
 
+type todoTreeNode struct {
+	Todo     integlife.TodoRecord
+	Context  bool
+	Children []*todoTreeNode
+}
+
+func buildTodoTree(service *integlife.Service, todos []integlife.TodoRecord) ([]*todoTreeNode, error) {
+	nodes := make(map[string]*todoTreeNode, len(todos))
+	order := make([]string, 0, len(todos))
+	for _, todo := range todos {
+		nodes[todo.UUID] = &todoTreeNode{Todo: todo}
+		order = append(order, todo.UUID)
+	}
+
+	var ensureAncestor func(uuid string) error
+	ensureAncestor = func(uuid string) error {
+		if strings.TrimSpace(uuid) == "" {
+			return nil
+		}
+		if _, ok := nodes[uuid]; ok {
+			return nil
+		}
+		todo, err := service.Todo(uuid)
+		if err != nil {
+			return nil
+		}
+		nodes[todo.UUID] = &todoTreeNode{Todo: todo, Context: true}
+		order = append(order, todo.UUID)
+		return ensureAncestor(todo.ParentUUID)
+	}
+
+	for _, todo := range todos {
+		if err := ensureAncestor(todo.ParentUUID); err != nil {
+			return nil, err
+		}
+	}
+
+	attached := map[string]bool{}
+	for _, uuid := range order {
+		node := nodes[uuid]
+		parentUUID := strings.TrimSpace(node.Todo.ParentUUID)
+		if parentUUID == "" || parentUUID == node.Todo.UUID {
+			continue
+		}
+		parent, ok := nodes[parentUUID]
+		if !ok {
+			continue
+		}
+		parent.Children = append(parent.Children, node)
+		attached[node.Todo.UUID] = true
+	}
+
+	roots := []*todoTreeNode{}
+	for _, uuid := range order {
+		if attached[uuid] {
+			continue
+		}
+		roots = append(roots, nodes[uuid])
+	}
+	return roots, nil
+}
+
+func printTodoTree(roots []*todoTreeNode, jsonOut bool) {
+	if jsonOut {
+		out := make([]map[string]any, 0, len(roots))
+		for _, root := range roots {
+			out = append(out, todoTreeJSON(root))
+		}
+		printJSON(out)
+		return
+	}
+	if len(roots) == 0 {
+		fmt.Println("no todos")
+		return
+	}
+	for _, root := range roots {
+		printTodoTreeNode(root, 0)
+	}
+}
+
+func printTodoTreeNode(node *todoTreeNode, depth int) {
+	marker := "[ ]"
+	if node.Todo.Completed {
+		marker = "[x]"
+	}
+	if node.Todo.DeletedAt != nil {
+		marker = "[-]"
+	}
+	context := ""
+	if node.Context {
+		context = " (context)"
+	}
+	fmt.Printf("%s%s %s %s%s\n", strings.Repeat("  ", depth), shortID(node.Todo.UUID), marker, node.Todo.Content, context)
+	for _, child := range node.Children {
+		printTodoTreeNode(child, depth+1)
+	}
+}
+
+func todoTreeJSON(node *todoTreeNode) map[string]any {
+	children := make([]map[string]any, 0, len(node.Children))
+	for _, child := range node.Children {
+		children = append(children, todoTreeJSON(child))
+	}
+	return map[string]any{
+		"todo":     todoJSON(node.Todo),
+		"context":  node.Context,
+		"children": children,
+	}
+}
+
 func formatTimePtr(value *time.Time) any {
 	if value == nil {
 		return nil
 	}
 	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func parseOptionalTimeFlag(value string) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		utc := parsed.UTC()
+		return &utc, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		utc := parsed.UTC()
+		return &utc, nil
+	}
+	if parsed, err := time.ParseInLocation("2006-01-02", value, time.Local); err == nil {
+		utc := parsed.UTC()
+		return &utc, nil
+	}
+	return nil, fmt.Errorf("invalid time %q; use RFC3339 or YYYY-MM-DD", value)
+}
+
+func deadlineRange(value string, now time.Time) (*time.Time, *time.Time, error) {
+	switch strings.TrimSpace(value) {
+	case "":
+		return nil, nil, nil
+	case "today":
+		start := dayStart(now)
+		end := start.AddDate(0, 0, 1)
+		return &start, &end, nil
+	case "week":
+		start := dayStart(now)
+		end := start.AddDate(0, 0, 7)
+		return &start, &end, nil
+	case "overdue":
+		nowUTC := now.UTC()
+		return nil, &nowUTC, nil
+	default:
+		return nil, nil, fmt.Errorf("invalid --due %q; choose today, week, or overdue", value)
+	}
+}
+
+func dayStart(value time.Time) time.Time {
+	local := value.In(time.Local)
+	start := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.Local)
+	return start.UTC()
 }
 
 func shortID(uuid string) string {
@@ -1142,10 +1472,11 @@ examples:
 
 func printTodoUsage(out *os.File) {
 	fmt.Fprint(out, `usage:
-  life todo add [--notes <text>] [--list <list>] [--order <n>] <content>
-  life todo list [--open|--done] [--all] [--list <list>] [--json]
+  life todo add [--notes <text>] [--list <list>] [--parent <todo>] [--deadline <time>] [--goal <uuid>] [--milestone <uuid>] [--order <n>] <content>
+  life todo list [--open|--done] [--all] [--list <list>] [--parent <todo>] [--root] [--due today|week|overdue] [--goal <uuid>] [--milestone <uuid>] [--search <text>] [--json]
+  life todo tree [--open|--done] [--all] [--list <list>] [--parent <todo>] [--root] [--due today|week|overdue] [--goal <uuid>] [--milestone <uuid>] [--search <text>] [--json]
   life todo show <uuid-or-prefix> [--json]
-  life todo update <uuid-or-prefix> [--content <text>] [--notes <text>] [--list <list>] [--clear-list] [--order <n>] [--done|--open]
+  life todo update <uuid-or-prefix> [--content <text>] [--notes <text>] [--list <list>] [--clear-list] [--parent <todo>] [--clear-parent] [--deadline <time>] [--clear-deadline] [--goal <uuid>] [--clear-goal] [--milestone <uuid>] [--clear-milestone] [--order <n>] [--done|--open]
   life todo done <uuid-or-prefix> [--undo]
   life todo reply <uuid-or-prefix> [--source <name>] [--actor <name>] <content>
   life todo replies <uuid-or-prefix> [--all] [--json]

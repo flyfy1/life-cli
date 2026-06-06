@@ -231,6 +231,92 @@ func TestTodoListFollowsParentLocally(t *testing.T) {
 	}
 }
 
+func TestTodoParentDeadlineAndQueryFilters(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "integlife.db"))
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	service := NewService(store, NewClient("", "", time.Second))
+	now := time.Date(2026, 6, 6, 9, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	listResult, err := service.AddTodoList(testContext(), "Project", "", "", 0)
+	if err != nil {
+		t.Fatalf("AddTodoList() error = %v", err)
+	}
+	parentResult, err := service.AddTodo(testContext(), "Parent", "", "Project", 0)
+	if err != nil {
+		t.Fatalf("AddTodo(parent) error = %v", err)
+	}
+	deadline := time.Date(2026, 6, 7, 0, 0, 0, 0, time.UTC)
+	childResult, err := service.AddTodoWithOptions(testContext(), AddTodoOptions{
+		Content:       "Child task",
+		ParentRef:     parentResult.Todo.UUID[:8],
+		Deadline:      &deadline,
+		GoalUUID:      "goal-1",
+		MilestoneUUID: "milestone-1",
+		Order:         1,
+	})
+	if err != nil {
+		t.Fatalf("AddTodoWithOptions(child) error = %v", err)
+	}
+	if childResult.Todo.ParentUUID != parentResult.Todo.UUID {
+		t.Fatalf("child parent uuid = %s, want %s", childResult.Todo.ParentUUID, parentResult.Todo.UUID)
+	}
+	if childResult.Todo.ListUUID != listResult.List.UUID {
+		t.Fatalf("child list uuid = %s, want inherited %s", childResult.Todo.ListUUID, listResult.List.UUID)
+	}
+
+	before := deadline.Add(time.Hour)
+	todos, err := service.ListTodosWithOptions(TodoListOptions{
+		CompletedFilter: ptrBool(false),
+		ParentRef:       parentResult.Todo.UUID[:8],
+		ParentFilter:    true,
+		GoalUUID:        "goal-1",
+		MilestoneUUID:   "milestone-1",
+		DeadlineBefore:  &before,
+		Search:          "Child",
+	})
+	if err != nil {
+		t.Fatalf("ListTodosWithOptions() error = %v", err)
+	}
+	if len(todos) != 1 || todos[0].UUID != childResult.Todo.UUID {
+		t.Fatalf("filtered todos = %#v, want child", todos)
+	}
+}
+
+func TestTodoParentCycleIsRejected(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "integlife.db"))
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	service := NewService(store, NewClient("", "", time.Second))
+	now := time.Date(2026, 6, 6, 10, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	parent, err := service.AddTodo(testContext(), "Parent", "", "", 0)
+	if err != nil {
+		t.Fatalf("AddTodo(parent) error = %v", err)
+	}
+	child, err := service.AddTodoWithOptions(testContext(), AddTodoOptions{
+		Content:   "Child",
+		ParentRef: parent.Todo.UUID,
+	})
+	if err != nil {
+		t.Fatalf("AddTodoWithOptions(child) error = %v", err)
+	}
+	if _, err := service.UpdateTodo(testContext(), parent.Todo.UUID, func(todo *TodoRecord) error {
+		todo.ParentUUID = child.Todo.UUID
+		return nil
+	}); err == nil {
+		t.Fatalf("UpdateTodo(parent cycle) error = nil, want error")
+	}
+}
+
 func TestTodoReplyLocalWrites(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "integlife.db"))
 	if err != nil {
@@ -273,6 +359,10 @@ func TestTodoReplyLocalWrites(t *testing.T) {
 	if len(pending) != 1 || pending[0].UUID != replyResult.Reply.UUID {
 		t.Fatalf("pending replies = %#v, want created reply", pending)
 	}
+}
+
+func ptrBool(value bool) *bool {
+	return &value
 }
 
 func TestAITaskLocalWritesStartProgressHeartbeat(t *testing.T) {

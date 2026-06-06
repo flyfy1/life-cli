@@ -15,6 +15,20 @@ type Store struct {
 	db *sql.DB
 }
 
+type TodoQuery struct {
+	IncludeDeleted  bool
+	CompletedFilter *bool
+	ListUUID        string
+	ParentUUID      string
+	ParentFilter    bool
+	RootOnly        bool
+	GoalUUID        string
+	MilestoneUUID   string
+	DeadlineBefore  *time.Time
+	DeadlineAfter   *time.Time
+	Search          string
+}
+
 func OpenStore(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
@@ -302,18 +316,57 @@ func (s *Store) ResolveTodo(ref string) (TodoRecord, error) {
 }
 
 func (s *Store) ListTodos(includeDeleted bool, completedFilter *bool, listUUID string) ([]TodoRecord, error) {
+	return s.ListTodosByQuery(TodoQuery{
+		IncludeDeleted:  includeDeleted,
+		CompletedFilter: completedFilter,
+		ListUUID:        listUUID,
+	})
+}
+
+func (s *Store) ListTodosByQuery(filters TodoQuery) ([]TodoRecord, error) {
+	if filters.ParentFilter && filters.RootOnly {
+		return nil, fmt.Errorf("parent filter and root filter cannot both be set")
+	}
 	query := todoSelectSQL() + ` WHERE 1=1`
 	args := []any{}
-	if !includeDeleted {
-		query += ` AND deleted_at IS NULL`
+	if !filters.IncludeDeleted {
+		query += ` AND deleted_at IS NULL AND archived_at IS NULL`
 	}
-	if completedFilter != nil {
+	if filters.CompletedFilter != nil {
 		query += ` AND completed = ?`
-		args = append(args, *completedFilter)
+		args = append(args, *filters.CompletedFilter)
 	}
-	if listUUID != "" {
+	if filters.ListUUID != "" {
 		query += ` AND list_uuid = ?`
-		args = append(args, listUUID)
+		args = append(args, filters.ListUUID)
+	}
+	if filters.ParentFilter {
+		query += ` AND parent_uuid = ?`
+		args = append(args, filters.ParentUUID)
+	}
+	if filters.RootOnly {
+		query += ` AND parent_uuid = ''`
+	}
+	if filters.GoalUUID != "" {
+		query += ` AND goal_uuid = ?`
+		args = append(args, filters.GoalUUID)
+	}
+	if filters.MilestoneUUID != "" {
+		query += ` AND milestone_uuid = ?`
+		args = append(args, filters.MilestoneUUID)
+	}
+	if filters.DeadlineBefore != nil {
+		query += ` AND deadline IS NOT NULL AND deadline < ?`
+		args = append(args, formatTime(*filters.DeadlineBefore))
+	}
+	if filters.DeadlineAfter != nil {
+		query += ` AND deadline IS NOT NULL AND deadline >= ?`
+		args = append(args, formatTime(*filters.DeadlineAfter))
+	}
+	if strings.TrimSpace(filters.Search) != "" {
+		query += ` AND (content LIKE ? OR notes LIKE ?)`
+		term := "%" + strings.TrimSpace(filters.Search) + "%"
+		args = append(args, term, term)
 	}
 	query += ` ORDER BY completed ASC, sort_order ASC, client_created_at ASC`
 	rows, err := s.db.Query(query, args...)
