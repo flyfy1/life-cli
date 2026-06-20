@@ -3,6 +3,7 @@ package integlife
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,11 @@ import (
 type Store struct {
 	db *sql.DB
 }
+
+const (
+	currentSchemaVersion = 4
+	sqliteBusyTimeoutMS  = 5000
+)
 
 type TodoQuery struct {
 	IncludeDeleted  bool
@@ -34,10 +40,12 @@ func OpenStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite db: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	store := &Store{db: db}
 	if err := store.init(); err != nil {
@@ -51,7 +59,52 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+func sqliteDSN(path string) string {
+	if path == ":memory:" {
+		path = "file::memory:"
+	}
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_pragma=" + url.QueryEscape(fmt.Sprintf("busy_timeout(%d)", sqliteBusyTimeoutMS))
+}
+
 func (s *Store) init() error {
+	deadline := time.Now().Add(time.Duration(sqliteBusyTimeoutMS) * time.Millisecond)
+	delay := 25 * time.Millisecond
+	for {
+		ready, err := s.schemaReady()
+		if err == nil && ready {
+			return nil
+		}
+		if err != nil && !isSQLiteBusy(err) {
+			return fmt.Errorf("check schema readiness: %w", err)
+		}
+
+		if err == nil {
+			err = s.migrateOnce()
+		} else {
+			err = fmt.Errorf("check schema readiness: %w", err)
+		}
+		if err == nil {
+			return nil
+		}
+		if !isSQLiteBusy(err) {
+			return err
+		}
+		if time.Now().Add(delay).After(deadline) {
+			return err
+		}
+		time.Sleep(delay)
+		delay *= 2
+		if delay > 250*time.Millisecond {
+			delay = 250 * time.Millisecond
+		}
+	}
+}
+
+func (s *Store) migrateOnce() error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin schema migration: %w", err)
@@ -65,6 +118,103 @@ func (s *Store) init() error {
 		return fmt.Errorf("commit schema migration: %w", err)
 	}
 	return nil
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "sqlite_busy") ||
+		strings.Contains(text, "database is locked") ||
+		strings.Contains(text, "database table is locked")
+}
+
+func (s *Store) schemaReady() (bool, error) {
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return false, fmt.Errorf("read schema version: %w", err)
+	}
+	if version != currentSchemaVersion {
+		return false, nil
+	}
+
+	for _, table := range []string{
+		"status_logs",
+		"todo_lists",
+		"todos",
+		"todo_replies",
+		"ai_task_runs",
+		"ai_task_events",
+		"active_ai_runs",
+		"sync_cursors",
+	} {
+		exists, err := s.hasSQLiteObject("table", table)
+		if err != nil {
+			return false, err
+		}
+		if !exists {
+			return false, nil
+		}
+	}
+
+	for _, index := range []string{
+		"idx_todo_lists_active_order",
+		"idx_todo_lists_pending",
+		"idx_todos_active_order",
+		"idx_todos_list",
+		"idx_todos_pending",
+		"idx_todo_replies_todo_created",
+		"idx_todo_replies_pending",
+		"idx_ai_task_runs_scope",
+		"idx_ai_task_runs_pending",
+		"idx_ai_task_events_run_pending",
+		"idx_active_ai_runs_run",
+	} {
+		exists, err := s.hasSQLiteObject("index", index)
+		if err != nil {
+			return false, err
+		}
+		if !exists {
+			return false, nil
+		}
+	}
+
+	hasLastSyncError, err := tableHasColumnDB(s.db, "status_logs", "last_sync_error")
+	if err != nil {
+		return false, err
+	}
+	if !hasLastSyncError {
+		return false, nil
+	}
+
+	for _, model := range []string{"ai_task_runs", "ai_task_events"} {
+		var found int
+		err := s.db.QueryRow(`SELECT 1 FROM sync_cursors WHERE model = ?`, model).Scan(&found)
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("check sync cursor %s: %w", model, err)
+		}
+	}
+	return true, nil
+}
+
+func (s *Store) hasSQLiteObject(objectType, name string) (bool, error) {
+	var found string
+	err := s.db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type = ? AND name = ?`,
+		objectType,
+		name,
+	).Scan(&found)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check sqlite %s %s: %w", objectType, name, err)
+	}
+	return true, nil
 }
 
 func migrateSchema(tx *sql.Tx) error {
@@ -101,7 +251,7 @@ func migrateSchema(tx *sql.Tx) error {
 		if err := initSyncCursors(tx, time.Now().UTC()); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`PRAGMA user_version = 4`); err != nil {
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, currentSchemaVersion)); err != nil {
 			return fmt.Errorf("set schema version: %w", err)
 		}
 		return nil
@@ -116,8 +266,8 @@ func migrateSchema(tx *sql.Tx) error {
 	if err := initSyncCursors(tx, time.Now().UTC()); err != nil {
 		return err
 	}
-	if version < 4 {
-		if _, err := tx.Exec(`PRAGMA user_version = 4`); err != nil {
+	if version < currentSchemaVersion {
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, currentSchemaVersion)); err != nil {
 			return fmt.Errorf("set schema version: %w", err)
 		}
 	}
@@ -1352,6 +1502,34 @@ func addColumnIfMissing(tx *sql.Tx, table, column, definition string) error {
 		return fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
 	return nil
+}
+
+func tableHasColumnDB(db *sql.DB, table, column string) (bool, error) {
+	if !safeSQLiteIdent(table) || !safeSQLiteIdent(column) {
+		return false, fmt.Errorf("unsafe sqlite identifier")
+	}
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, fmt.Errorf("table info %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return false, fmt.Errorf("scan table info %s: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate table info %s: %w", table, err)
+	}
+	return false, nil
 }
 
 func tableHasColumn(tx *sql.Tx, table, column string) (bool, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -95,8 +96,8 @@ func TestStoreMigratesOldStatusLogsSchema(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read user_version error = %v", err)
 	}
-	if version != 4 {
-		t.Fatalf("user_version = %d, want 4", version)
+	if version != currentSchemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, currentSchemaVersion)
 	}
 	for _, table := range []string{"todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events", "active_ai_runs", "sync_cursors"} {
 		var name string
@@ -110,6 +111,42 @@ func TestStoreMigratesOldStatusLogsSchema(t *testing.T) {
 	}
 	if !has {
 		t.Fatalf("status_logs.last_sync_error missing after migration")
+	}
+}
+
+func TestOpenStoreConcurrentInitialization(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "integlife.db")
+	const workers = 8
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			store, err := OpenStore(dbPath)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer store.Close()
+			if _, err := store.ListTodoLists(false); err != nil {
+				errs <- err
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent OpenStore() error = %v", err)
+		}
 	}
 }
 
