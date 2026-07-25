@@ -17,7 +17,7 @@ It is intentionally independent from the main `life-on-golang` backend codebase.
 
 ### Download Pre-built Binary
 
-Visit the [Releases page](https://github.com/flyfy1/life-cli/releases) and download the binary for your platform:
+Visit the [Releases page](https://github.com/integ-life/life-cli/releases) and download the binary for your platform:
 
 - **macOS Intel (x86_64)**: `life-*-darwin-amd64`
 - **macOS Apple Silicon (ARM64)**: `life-*-darwin-arm64`

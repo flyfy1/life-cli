@@ -19,7 +19,7 @@ This document describes how to build and release the `life` CLI for multiple arc
 
 ### Method 2: Manual Workflow Dispatch
 
-1. Go to the [Actions tab](https://github.com/flyfy1/life-cli/actions) in GitHub
+1. Go to the [Actions tab](https://github.com/integ-life/life-cli/actions) in GitHub
 2. Select the "Build and Release CLI" workflow
 3. Click "Run workflow"
 4. Enter the version (e.g., `v1.0.0`)
