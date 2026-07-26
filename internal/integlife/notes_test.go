@@ -25,6 +25,9 @@ func TestAIWorklogUsesEditableMarkdownCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !strings.HasPrefix(result.Note.Path, "inbox/") {
+		t.Fatalf("note path = %q", result.Note.Path)
+	}
 	path := filepath.Join(store.NotesDir(), result.Note.Path)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -51,6 +54,51 @@ func TestAIWorklogUsesEditableMarkdownCache(t *testing.T) {
 	}
 	if len(pending) != 1 || !strings.Contains(pending[0].Content, "Result: done") {
 		t.Fatalf("pending notes = %#v", pending)
+	}
+}
+
+func TestRemotePathMoveUsesNestedFile(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "integlife.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	base := time.Date(2026, 7, 26, 7, 0, 0, 0, time.UTC)
+	service := NewService(store, NewClient("", "", time.Second))
+	service.now = func() time.Time { return base }
+	created, err := service.NewAIWorklog("Move this note")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkNoteSynced(created.Note.UUID, base); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPath := filepath.Join(store.NotesDir(), created.Note.Path)
+	movedPath := "archive/2026/moved.md"
+	conflict, err := store.ApplyRemoteNote(NoteRecord{
+		UUID:      created.Note.UUID,
+		Path:      movedPath,
+		Content:   created.Note.Content,
+		CreatedAt: base,
+		UpdatedAt: base.Add(time.Minute),
+	}, base.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict {
+		t.Fatal("server-only path move should not conflict")
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old file still exists: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(store.NotesDir(), movedPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != created.Note.Content {
+		t.Fatalf("moved content = %q", data)
 	}
 }
 

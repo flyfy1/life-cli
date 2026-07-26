@@ -243,7 +243,9 @@ func (s *Store) ApplyRemoteNote(remote NoteRecord, syncedAt time.Time) (bool, er
 		if remote.DeletedAt != nil || !isAIWorklog(remote.Content) {
 			return false, nil
 		}
-		remote.Path = noteFilename(remote)
+		if remote.Path == "" {
+			remote.Path = noteFilename(remote)
+		}
 		remote.SyncedAt = &syncedAt
 		remote.SyncedContentHash = noteStateHash(remote.Content, remote.DeletedAt)
 		if err := s.writeNoteFile(remote.Path, remote.Content); err != nil {
@@ -254,27 +256,33 @@ func (s *Store) ApplyRemoteNote(remote NoteRecord, syncedAt time.Time) (bool, er
 
 	localChanged := noteStateHash(local.Content, local.DeletedAt) != local.SyncedContentHash
 	remoteChanged := noteStateHash(remote.Content, remote.DeletedAt) != local.SyncedContentHash
+	remotePathChanged := remote.Path != "" && remote.Path != local.Path
 	if local.SyncedContentHash == "" {
 		remoteChanged = noteStateHash(remote.Content, remote.DeletedAt) != noteStateHash(local.Content, local.DeletedAt)
 	}
 	if localChanged {
-		if remoteChanged {
+		if remoteChanged || remotePathChanged {
 			return true, s.ApplyNoteConflict(local.UUID, remote)
 		}
 		return false, nil
 	}
 
-	remote.Path = local.Path
+	if remote.Path == "" {
+		remote.Path = local.Path
+	}
 	remote.SyncedAt = &syncedAt
 	remote.SyncedContentHash = noteStateHash(remote.Content, remote.DeletedAt)
 	if remote.DeletedAt != nil {
-		if err := os.Remove(s.mustNoteFilePath(remote.Path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(s.mustNoteFilePath(local.Path)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return false, fmt.Errorf("remove deleted note: %w", err)
 		}
 	} else if err := s.writeNoteFile(remote.Path, remote.Content); err != nil {
 		return false, err
 	}
-	_ = os.Remove(s.remoteNotePath(remote.Path))
+	if remote.Path != local.Path {
+		_ = os.Remove(s.mustNoteFilePath(local.Path))
+	}
+	_ = os.Remove(s.remoteNotePath(local.Path))
 	return false, s.SaveNote(remote)
 }
 
@@ -393,10 +401,15 @@ func (s *Store) noteByUUID(uuid string) (NoteRecord, error) {
 }
 
 func (s *Store) noteFilePath(name string) (string, error) {
-	if name == "" || filepath.Base(name) != name {
+	name = strings.TrimSpace(name)
+	rel := filepath.Clean(filepath.FromSlash(name))
+	if name == "" || strings.Contains(name, "\\") || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("invalid cached note path: %q", name)
 	}
-	return filepath.Join(s.notesDir, name), nil
+	if !strings.EqualFold(filepath.Ext(rel), ".md") {
+		return "", fmt.Errorf("cached note path must end in .md: %q", name)
+	}
+	return filepath.Join(s.notesDir, rel), nil
 }
 
 func (s *Store) mustNoteFilePath(name string) string {
@@ -453,7 +466,7 @@ func noteFilename(note NoteRecord) string {
 		}
 	}
 	stamp := note.CreatedAt.UTC().Format("20060102-1504")
-	return fmt.Sprintf("%s-%s--%s.md", stamp, filenameSlug(title), filenameSlug(note.UUID))
+	return filepath.ToSlash(filepath.Join("inbox", fmt.Sprintf("%s-%s--%s.md", stamp, filenameSlug(title), filenameSlug(note.UUID))))
 }
 
 func filenameSlug(value string) string {

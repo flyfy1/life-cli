@@ -177,6 +177,7 @@ type syncNote struct {
 	UserID    int     `json:"user_id"`
 	UUID      string  `json:"uuid"`
 	DeletedAt *string `json:"deleted_at,omitempty"`
+	Path      string  `json:"path,omitempty"`
 	Content   string  `json:"content"`
 }
 
@@ -626,6 +627,7 @@ func noteToSync(note NoteRecord) syncNote {
 		UserID:    0,
 		UUID:      note.UUID,
 		DeletedAt: timePtrString(note.DeletedAt),
+		Path:      note.Path,
 		Content:   note.Content,
 	}
 }
@@ -634,6 +636,7 @@ func noteFromSync(note syncNote) NoteRecord {
 	now := time.Now().UTC()
 	return NoteRecord{
 		UUID:      note.UUID,
+		Path:      note.Path,
 		Content:   note.Content,
 		DeletedAt: parseSyncTimePtr(note.DeletedAt),
 		CreatedAt: parseSyncTimeOrNow(note.CreatedAt, now),
