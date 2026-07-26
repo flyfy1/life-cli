@@ -38,8 +38,12 @@ func TestAIWorklogUsesEditableMarkdownCache(t *testing.T) {
 	if err := os.WriteFile(path, append(data, []byte("\n- Result: done\n")...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RefreshNoteFiles(now); err != nil {
+	notes, err := service.ListNotes(false, false)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(notes) != 1 || notes[0].SyncedAt != nil {
+		t.Fatalf("listed notes = %#v", notes)
 	}
 	pending, err := store.PendingNotes()
 	if err != nil {

@@ -370,6 +370,9 @@ func (s *Service) NewAIWorklog(title string) (NoteCommandResult, error) {
 }
 
 func (s *Service) ListNotes(includeDeleted, conflictsOnly bool) ([]NoteRecord, error) {
+	if err := s.store.RefreshNoteFiles(s.now()); err != nil {
+		return nil, err
+	}
 	return s.store.ListNotes(includeDeleted, conflictsOnly)
 }
 
