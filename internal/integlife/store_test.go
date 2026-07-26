@@ -99,7 +99,7 @@ func TestStoreMigratesOldStatusLogsSchema(t *testing.T) {
 	if version != currentSchemaVersion {
 		t.Fatalf("user_version = %d, want %d", version, currentSchemaVersion)
 	}
-	for _, table := range []string{"todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events", "active_ai_runs", "sync_cursors"} {
+	for _, table := range []string{"notes", "todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events", "active_ai_runs", "sync_cursors"} {
 		var name string
 		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name); err != nil {
 			t.Fatalf("missing table %s: %v", table, err)

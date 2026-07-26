@@ -142,7 +142,7 @@ func (c *Client) SyncRecords(ctx context.Context, batch SyncBatch) (SyncAck, err
 type syncPayload struct {
 	SyncModels        []string           `json:"sync_models"`
 	LastSyncAtByModel map[string]*string `json:"last_sync_at_by_model"`
-	Notes             []any              `json:"notes"`
+	Notes             []syncNote         `json:"notes"`
 	Comments          []any              `json:"comments"`
 	MoneyCurrencies   []any              `json:"money_currencies"`
 	MoneyTransactions []any              `json:"money_transactions"`
@@ -169,6 +169,15 @@ type syncStatusLog struct {
 	UserID    int    `json:"user_id"`
 	LogType   string `json:"log_type"`
 	Content   string `json:"content"`
+}
+
+type syncNote struct {
+	CreatedAt string  `json:"created_at"`
+	UpdatedAt string  `json:"updated_at"`
+	UserID    int     `json:"user_id"`
+	UUID      string  `json:"uuid"`
+	DeletedAt *string `json:"deleted_at,omitempty"`
+	Content   string  `json:"content"`
 }
 
 type syncTodo struct {
@@ -273,6 +282,8 @@ type syncAITaskEvent struct {
 }
 
 type syncResponse struct {
+	NotesServerNewer        []syncNote        `json:"notes_server_newer"`
+	NotesOnlyOnServer       []syncNote        `json:"notes_only_on_server"`
 	ServerTime              string            `json:"server_time"`
 	TodosServerNewer        []syncTodo        `json:"todos_server_newer"`
 	TodosOnlyOnServer       []syncTodo        `json:"todos_only_on_server"`
@@ -297,27 +308,32 @@ type syncEventReject struct {
 }
 
 func buildSyncBatchPayload(batch SyncBatch) syncPayload {
-	models := []string{}
-	if len(batch.StatusLogs) > 0 {
-		models = append(models, "status_logs")
-	}
-	if len(batch.TodoLists) > 0 {
-		models = append(models, "todo_lists")
-	}
-	if len(batch.Todos) > 0 {
-		models = append(models, "todos")
-	}
-	if len(batch.TodoReplies) > 0 {
-		models = append(models, "todo_replies")
-	}
-	if len(batch.AITaskRuns) > 0 {
-		models = append(models, "ai_task_runs")
-	}
-	if len(batch.AITaskEvents) > 0 {
-		models = append(models, "ai_task_events")
+	models := append([]string(nil), batch.Models...)
+	if len(models) == 0 {
+		if len(batch.Notes) > 0 {
+			models = append(models, "notes")
+		}
+		if len(batch.StatusLogs) > 0 {
+			models = append(models, "status_logs")
+		}
+		if len(batch.TodoLists) > 0 {
+			models = append(models, "todo_lists")
+		}
+		if len(batch.Todos) > 0 {
+			models = append(models, "todos")
+		}
+		if len(batch.TodoReplies) > 0 {
+			models = append(models, "todo_replies")
+		}
+		if len(batch.AITaskRuns) > 0 {
+			models = append(models, "ai_task_runs")
+		}
+		if len(batch.AITaskEvents) > 0 {
+			models = append(models, "ai_task_events")
+		}
 	}
 	if len(models) == 0 {
-		models = []string{"status_logs", "todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events"}
+		models = []string{"notes", "status_logs", "todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events"}
 	}
 	lastSyncAtByModel := map[string]*string{}
 	for _, model := range models {
@@ -344,6 +360,11 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 			LogType:   record.LogType,
 			Content:   record.Content,
 		})
+	}
+
+	notes := make([]syncNote, 0, len(batch.Notes))
+	for _, note := range batch.Notes {
+		notes = append(notes, noteToSync(note))
 	}
 
 	todoLists := make([]syncTodoList, 0, len(batch.TodoLists))
@@ -414,7 +435,7 @@ func buildSyncBatchPayload(batch SyncBatch) syncPayload {
 	return syncPayload{
 		SyncModels:        models,
 		LastSyncAtByModel: lastSyncAtByModel,
-		Notes:             []any{},
+		Notes:             notes,
 		Comments:          []any{},
 		MoneyCurrencies:   []any{},
 		MoneyTransactions: []any{},
@@ -447,6 +468,10 @@ func buildSyncAck(batch SyncBatch, resp syncResponse, detail string) SyncAck {
 		runConflicts[run.UUID] = true
 	}
 	ack := SyncAck{
+		Models:              append([]string(nil), batch.Models...),
+		NoteSynced:          []string{},
+		NoteConflicts:       []NoteRecord{},
+		NoteServerRows:      []NoteRecord{},
 		StatusLogUUIDs:      make([]string, 0, len(batch.StatusLogs)),
 		TodoSynced:          []string{},
 		TodoServerRecords:   []TodoRecord{},
@@ -459,6 +484,33 @@ func buildSyncAck(batch SyncBatch, resp syncResponse, detail string) SyncAck {
 		AITaskEventErrors:   map[string]string{},
 		ServerTime:          serverTime,
 		Detail:              detail,
+	}
+	if len(ack.Models) == 0 {
+		ack.Models = append([]string(nil), buildSyncBatchPayload(batch).SyncModels...)
+	}
+	pendingNotes := map[string]bool{}
+	for _, note := range batch.Notes {
+		pendingNotes[note.UUID] = true
+	}
+	noteConflicts := map[string]bool{}
+	for _, note := range resp.NotesServerNewer {
+		remote := noteFromSync(note)
+		if pendingNotes[note.UUID] {
+			noteConflicts[note.UUID] = true
+			ack.NoteConflicts = append(ack.NoteConflicts, remote)
+			continue
+		}
+		ack.NoteServerRows = append(ack.NoteServerRows, remote)
+	}
+	for _, note := range resp.NotesOnlyOnServer {
+		if !pendingNotes[note.UUID] {
+			ack.NoteServerRows = append(ack.NoteServerRows, noteFromSync(note))
+		}
+	}
+	for _, note := range batch.Notes {
+		if !noteConflicts[note.UUID] {
+			ack.NoteSynced = append(ack.NoteSynced, note.UUID)
+		}
 	}
 	for _, record := range batch.StatusLogs {
 		ack.StatusLogUUIDs = append(ack.StatusLogUUIDs, record.UUID)
@@ -565,6 +617,28 @@ func buildSyncAck(batch SyncBatch, resp syncResponse, detail string) SyncAck {
 		}
 	}
 	return ack
+}
+
+func noteToSync(note NoteRecord) syncNote {
+	return syncNote{
+		CreatedAt: note.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt: note.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		UserID:    0,
+		UUID:      note.UUID,
+		DeletedAt: timePtrString(note.DeletedAt),
+		Content:   note.Content,
+	}
+}
+
+func noteFromSync(note syncNote) NoteRecord {
+	now := time.Now().UTC()
+	return NoteRecord{
+		UUID:      note.UUID,
+		Content:   note.Content,
+		DeletedAt: parseSyncTimePtr(note.DeletedAt),
+		CreatedAt: parseSyncTimeOrNow(note.CreatedAt, now),
+		UpdatedAt: parseSyncTimeOrNow(note.UpdatedAt, now),
+	}
 }
 
 func todoToSync(todo TodoRecord) syncTodo {

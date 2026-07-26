@@ -135,6 +135,11 @@ func TestSyncResponseAckHandling(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request payload error = %v", err)
 		}
+		if reflect.DeepEqual(payload.SyncModels, []string{"notes"}) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"server_time":"` + serverTime + `"}`))
+			return
+		}
 		if len(payload.AITaskRuns) != 2 || len(payload.AITaskEvents) != 3 {
 			t.Fatalf("payload counts = runs %d events %d, want 2/3", len(payload.AITaskRuns), len(payload.AITaskEvents))
 		}
@@ -194,6 +199,11 @@ func TestSyncPendingPullsTodosWhenNoLocalPending(t *testing.T) {
 		var payload syncPayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request payload error = %v", err)
+		}
+		if reflect.DeepEqual(payload.SyncModels, []string{"notes"}) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"server_time":"` + now.Format(time.RFC3339Nano) + `"}`))
+			return
 		}
 		if payload.LastSyncAtByModel["todo_lists"] != nil || payload.LastSyncAtByModel["todos"] != nil {
 			t.Fatalf("todo cursors = %v/%v, want nil first-sync cursors", payload.LastSyncAtByModel["todo_lists"], payload.LastSyncAtByModel["todos"])

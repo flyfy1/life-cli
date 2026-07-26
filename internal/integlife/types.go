@@ -84,6 +84,21 @@ type SyncResult struct {
 	Failures []SyncFailure
 }
 
+type NoteRecord struct {
+	UUID              string
+	Path              string
+	Content           string
+	DeletedAt         *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	SyncedAt          *time.Time
+	SyncedContentHash string
+	RemoteContent     string
+	RemoteUpdatedAt   *time.Time
+	RemoteDeletedAt   *time.Time
+	LastSyncError     string
+}
+
 type AITaskRunRecord struct {
 	UUID                string
 	ProjectType         string
@@ -147,6 +162,8 @@ type SyncCursor struct {
 }
 
 type SyncBatch struct {
+	Models       []string
+	Notes        []NoteRecord
 	StatusLogs   []Record
 	Todos        []TodoRecord
 	TodoLists    []TodoListRecord
@@ -157,6 +174,10 @@ type SyncBatch struct {
 }
 
 type SyncAck struct {
+	Models              []string
+	NoteSynced          []string
+	NoteConflicts       []NoteRecord
+	NoteServerRows      []NoteRecord
 	StatusLogUUIDs      []string
 	TodoSynced          []string
 	TodoConflicts       []string

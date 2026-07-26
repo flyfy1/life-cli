@@ -10,6 +10,8 @@ It is intentionally independent from the main `life-on-golang` backend codebase.
 - Best-effort sync to `/api/notes/sync`
 - Keep working offline when the network or token is unavailable
 - Retry unsynced records later with `sync`
+- Edit `#ai-worklog` Notes as local Markdown files
+- Pull and push worklog Notes without overwriting two-sided changes
 - Manage todos and todo lists locally with best-effort sync
 - Track AI task runs and progress events locally first
 
@@ -59,6 +61,9 @@ This creates binaries for all supported platforms in the `./build` directory and
 ./life ai start --project goal:<uuid> --todo <uuid> --title "Implement sync" --agent codex --json
 ./life ai progress --run <run_uuid> --phase coding --summary "Wrote local storage"
 ./life ai complete --run <run_uuid> --summary "Finished implementation"
+./life note new --title "Implement cached AI worklogs"
+./life note path <note_uuid_or_prefix>
+./life note sync
 ./life list add Work --color blue --icon briefcase
 ./life todo add --list Work "Write release notes"
 ./life todo list --open
@@ -77,6 +82,7 @@ This creates binaries for all supported platforms in the `./build` directory and
 - `life list add/list/update/delete` - Manage todo lists
 - `life todo add/list/show/update/done/delete` - Manage todos
 - `life ai start/progress/heartbeat/event/block/complete/status/resume/resolve` - Track AI task execution progress
+- `life note new/list/path/dir/sync/resolve` - Manage cached AI worklog Notes
 - `life --version` - Show version
 
 ## Environment variables
@@ -95,8 +101,11 @@ Primary variables:
 - `sync` sends every unsynced record in timestamp order.
 - Todo and list writes are local first. If a token is configured, the CLI tries to sync through `/api/notes/sync` immediately and leaves failed records pending.
 - AI task events use a canonical SHA-256 payload hash. `metadata-json` must not contain JSON numbers; use strings for numeric values.
+- AI worklog Markdown files live beside the database in `~/.integlife/notes/`. `life note new` creates a local pending file; edit it directly, then run `life note sync`.
+- Only remote Notes containing `#ai-worklog` are pulled into this cache. Deleting a cached file soft-deletes the remote Note on the next sync.
+- If both copies changed, sync keeps the local file, writes the server copy as `.remote.md`, prints the conflict, and exits non-zero. Merge the files and run `life note resolve <uuid> --local`, or discard local changes with `--remote`.
 - Sync failures do not delete local data.
 
 ## API compatibility
 
-This project targets the existing LifeOnGolang `/api/notes/sync` contract for `status_logs`, `todo_lists`, `todos`, `ai_task_runs`, and `ai_task_events`, but it does not import any code from that repository.
+This project targets the existing LifeOnGolang `/api/notes/sync` contract for `notes`, `status_logs`, `todo_lists`, `todos`, `ai_task_runs`, and `ai_task_events`, but it does not import any code from that repository.

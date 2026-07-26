@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -81,6 +82,9 @@ func run(ctx context.Context, args []string) error {
 
 	case "ai":
 		return cmdAI(ctx, service, args[1:])
+
+	case "note":
+		return cmdNote(ctx, service, args[1:])
 
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
@@ -902,7 +906,108 @@ func cmdSync(ctx context.Context, service *integlife.Service) error {
 	for _, f := range result.Failures {
 		fmt.Printf("sync failed: uuid=%s detail=%s\n", f.UUID, f.Detail)
 	}
+	if len(result.Failures) > 0 {
+		return fmt.Errorf("sync needs attention: %d conflict(s) or failure(s)", len(result.Failures))
+	}
 	return nil
+}
+
+func cmdNote(ctx context.Context, service *integlife.Service, args []string) error {
+	if len(args) == 0 {
+		printNoteUsage(os.Stderr)
+		return errors.New("missing note command")
+	}
+	switch args[0] {
+	case "new":
+		fs := flag.NewFlagSet("life note new", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		title := fs.String("title", "", "worklog title")
+		jsonOut := fs.Bool("json", false, "print json")
+		positionals, err := parseCommandFlags(fs, args[1:], []string{"title"}, []string{"json"})
+		if err != nil {
+			return err
+		}
+		value := strings.TrimSpace(*title)
+		if value == "" {
+			value = strings.TrimSpace(strings.Join(positionals, " "))
+		}
+		result, err := service.NewAIWorklog(value)
+		if err != nil {
+			return err
+		}
+		printNote(result.Note, service.NotesDir(), *jsonOut)
+		if *jsonOut {
+			return nil
+		}
+		if result.Synced {
+			fmt.Printf("sync ok: %s\n", result.SyncDetail)
+		} else if result.SyncDetail != "" {
+			fmt.Printf("sync skipped: %s\n", result.SyncDetail)
+		}
+		return nil
+	case "list":
+		fs := flag.NewFlagSet("life note list", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		all := fs.Bool("all", false, "include deleted notes")
+		conflicts := fs.Bool("conflicts", false, "show only unresolved conflicts")
+		jsonOut := fs.Bool("json", false, "print json")
+		if _, err := parseCommandFlags(fs, args[1:], nil, []string{"all", "conflicts", "json"}); err != nil {
+			return err
+		}
+		notes, err := service.ListNotes(*all, *conflicts)
+		if err != nil {
+			return err
+		}
+		printNotes(notes, service.NotesDir(), *jsonOut)
+		return nil
+	case "path":
+		if len(args) != 2 {
+			return errors.New("usage: life note path <uuid-or-prefix>")
+		}
+		note, err := service.Note(args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Println(filepath.Join(service.NotesDir(), note.Path))
+		return nil
+	case "dir":
+		if len(args) != 1 {
+			return errors.New("usage: life note dir")
+		}
+		fmt.Println(service.NotesDir())
+		return nil
+	case "resolve":
+		fs := flag.NewFlagSet("life note resolve", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		local := fs.Bool("local", false, "keep the edited local file and upload it")
+		remote := fs.Bool("remote", false, "discard local changes and keep the server version")
+		positionals, err := parseCommandFlags(fs, args[1:], nil, []string{"local", "remote"})
+		if err != nil {
+			return err
+		}
+		if len(positionals) != 1 || *local == *remote {
+			return errors.New("usage: life note resolve <uuid-or-prefix> --local|--remote")
+		}
+		note, err := service.ResolveNote(positionals[0], *remote)
+		if err != nil {
+			return err
+		}
+		printNote(note, service.NotesDir(), false)
+		if *local {
+			fmt.Println("resolved locally; run life sync to upload the merged file")
+		} else {
+			fmt.Println("resolved with server version")
+		}
+		return nil
+	case "sync":
+		return cmdSync(ctx, service)
+	case "help", "-h", "--help":
+		printNoteUsage(os.Stdout)
+		return nil
+	default:
+		printNoteUsage(os.Stderr)
+		return fmt.Errorf("unknown note command: %s", args[0])
+	}
 }
 
 func printAICommandResult(result integlife.AICommandResult, jsonOut bool) {
@@ -1018,6 +1123,60 @@ func printTodo(todo integlife.TodoRecord, jsonOut bool) {
 	}
 	if todo.LastSyncError != "" {
 		fmt.Printf("sync conflict/error: %s\n", todo.LastSyncError)
+	}
+}
+
+func printNote(note integlife.NoteRecord, notesDir string, jsonOut bool) {
+	path := filepath.Join(notesDir, note.Path)
+	if jsonOut {
+		printJSON(map[string]any{
+			"uuid":            note.UUID,
+			"path":            path,
+			"deleted_at":      note.DeletedAt,
+			"updated_at":      note.UpdatedAt,
+			"synced":          note.SyncedAt != nil,
+			"last_sync_error": note.LastSyncError,
+		})
+		return
+	}
+	state := "pending"
+	if note.SyncedAt != nil {
+		state = "synced"
+	}
+	if note.DeletedAt != nil {
+		state = "deleted"
+	}
+	if note.LastSyncError != "" {
+		state = "conflict"
+	}
+	fmt.Printf("%s [%s] %s\n", shortID(note.UUID), state, path)
+	if note.LastSyncError != "" {
+		fmt.Printf("sync conflict/error: %s\n", note.LastSyncError)
+	}
+}
+
+func printNotes(notes []integlife.NoteRecord, notesDir string, jsonOut bool) {
+	if jsonOut {
+		out := make([]map[string]any, 0, len(notes))
+		for _, note := range notes {
+			out = append(out, map[string]any{
+				"uuid":            note.UUID,
+				"path":            filepath.Join(notesDir, note.Path),
+				"deleted_at":      note.DeletedAt,
+				"updated_at":      note.UpdatedAt,
+				"synced":          note.SyncedAt != nil,
+				"last_sync_error": note.LastSyncError,
+			})
+		}
+		printJSON(out)
+		return
+	}
+	if len(notes) == 0 {
+		fmt.Println("no cached AI worklog notes")
+		return
+	}
+	for _, note := range notes {
+		printNote(note, notesDir, false)
 	}
 }
 
@@ -1459,6 +1618,7 @@ func printUsage(out *os.File) {
   life todo <command>                   manage todos
   life list <command>                   manage todo lists
   life ai <command>                     report AI task progress
+  life note <command>                   manage cached AI worklog notes
 
 moods: %s
 
@@ -1468,6 +1628,20 @@ examples:
   life --mood happy 'shipped the feature!'
   life work --mood focused 'deep work session'
 `, strings.Join(moods, ", "))
+}
+
+func printNoteUsage(out *os.File) {
+	fmt.Fprint(out, `usage:
+  life note new [--title <text>] [<title>] [--json]
+  life note list [--all] [--conflicts] [--json]
+  life note path <uuid-or-prefix>
+  life note dir
+  life note sync
+  life note resolve <uuid-or-prefix> --local|--remote
+
+The Markdown files in "life note dir" are the local cache. Edit them directly;
+delete a file to delete its remote note on the next sync.
+`)
 }
 
 func printTodoUsage(out *os.File) {

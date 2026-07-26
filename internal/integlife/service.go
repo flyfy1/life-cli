@@ -496,12 +496,37 @@ func (s *Service) SyncPending(ctx context.Context) (SyncResult, error) {
 		return SyncResult{}, fmt.Errorf("INTEGLIFE_API_TOKEN not set")
 	}
 
+	if err := s.store.RefreshNoteFiles(s.now()); err != nil {
+		return SyncResult{}, err
+	}
+	cursors, err := s.store.SyncCursors()
+	if err != nil {
+		return SyncResult{}, err
+	}
+	notePullAck, err := s.client.SyncRecords(ctx, SyncBatch{
+		Models:  []string{"notes"},
+		Cursors: cursors,
+	})
+	if err != nil {
+		return SyncResult{}, err
+	}
+	if err := s.applySyncAck(notePullAck); err != nil {
+		return SyncResult{}, err
+	}
+
 	batch, err := s.store.PendingSyncBatch()
 	if err != nil {
 		return SyncResult{}, err
 	}
-	pendingCount := len(batch.StatusLogs) + len(batch.TodoLists) + len(batch.Todos) + len(batch.TodoReplies) + len(batch.AITaskRuns) + len(batch.AITaskEvents)
+	notePendingCount, err := s.store.PendingNoteCount()
+	if err != nil {
+		return SyncResult{}, err
+	}
+	pendingCount := notePendingCount + len(batch.StatusLogs) + len(batch.TodoLists) + len(batch.Todos) + len(batch.TodoReplies) + len(batch.AITaskRuns) + len(batch.AITaskEvents)
 	result := SyncResult{Pending: pendingCount}
+	if len(batch.Notes)+len(batch.StatusLogs)+len(batch.TodoLists)+len(batch.Todos)+len(batch.TodoReplies)+len(batch.AITaskRuns)+len(batch.AITaskEvents) == 0 {
+		batch.Models = []string{"status_logs", "todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events"}
+	}
 
 	ack, err := s.client.SyncRecords(ctx, batch)
 	if err != nil {
@@ -515,7 +540,7 @@ func (s *Service) SyncPending(ctx context.Context) (SyncResult, error) {
 		return SyncResult{}, err
 	}
 
-	result.Synced = len(ack.StatusLogUUIDs) + len(ack.TodoListSynced) + len(ack.TodoSynced) + len(ack.TodoReplySynced) +
+	result.Synced = len(notePullAck.NoteServerRows) + len(ack.NoteSynced) + len(ack.StatusLogUUIDs) + len(ack.TodoListSynced) + len(ack.TodoSynced) + len(ack.TodoReplySynced) +
 		len(ack.TodoListServerRows) + len(ack.TodoServerRecords) + len(ack.TodoReplyServerRows) + len(ack.AITaskRunSynced) + len(ack.AITaskEventSynced)
 	for _, uuid := range ack.TodoListConflicts {
 		result.Failures = append(result.Failures, SyncFailure{UUID: uuid, Detail: "conflict: server newer"})
@@ -531,6 +556,13 @@ func (s *Service) SyncPending(ctx context.Context) (SyncResult, error) {
 	}
 	for uuid, detail := range ack.AITaskEventErrors {
 		result.Failures = append(result.Failures, SyncFailure{UUID: uuid, Detail: detail})
+	}
+	noteConflicts, err := s.store.ListNotes(true, true)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	for _, note := range noteConflicts {
+		result.Failures = append(result.Failures, SyncFailure{UUID: note.UUID, Detail: note.LastSyncError})
 	}
 	return result, nil
 }
@@ -865,6 +897,21 @@ func (s *Service) bestEffortSync(ctx context.Context) (bool, string) {
 }
 
 func (s *Service) applySyncAck(ack SyncAck) error {
+	for _, uuid := range ack.NoteSynced {
+		if err := s.store.MarkNoteSynced(uuid, ack.ServerTime); err != nil {
+			return err
+		}
+	}
+	for _, note := range ack.NoteConflicts {
+		if err := s.store.ApplyNoteConflict(note.UUID, note); err != nil {
+			return err
+		}
+	}
+	for _, note := range ack.NoteServerRows {
+		if _, err := s.store.ApplyRemoteNote(note, ack.ServerTime); err != nil {
+			return err
+		}
+	}
 	for _, uuid := range ack.StatusLogUUIDs {
 		if err := s.store.MarkSynced(uuid, ack.ServerTime); err != nil {
 			return err
@@ -935,13 +982,24 @@ func (s *Service) applySyncAck(ack SyncAck) error {
 			return err
 		}
 	}
-	if err := s.store.UpdateSyncCursors([]string{"todo_lists", "todos", "todo_replies", "ai_task_runs", "ai_task_events"}, ack.ServerTime); err != nil {
+	cursorModels := []string{}
+	for _, model := range ack.Models {
+		if model != "status_logs" {
+			cursorModels = append(cursorModels, model)
+		}
+	}
+	if err := s.store.UpdateSyncCursors(cursorModels, ack.ServerTime); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (s *Service) markBatchSyncError(batch SyncBatch, detail string) error {
+	for _, note := range batch.Notes {
+		if err := s.store.MarkNoteSyncError(note.UUID, detail); err != nil {
+			return err
+		}
+	}
 	for _, record := range batch.StatusLogs {
 		if err := s.store.MarkSyncError(record.UUID, detail); err != nil {
 			return err
@@ -977,6 +1035,9 @@ func (s *Service) markBatchSyncError(batch SyncBatch, detail string) error {
 
 func failuresForBatch(batch SyncBatch, detail string) []SyncFailure {
 	failures := []SyncFailure{}
+	for _, note := range batch.Notes {
+		failures = append(failures, SyncFailure{UUID: note.UUID, Detail: detail})
+	}
 	for _, record := range batch.StatusLogs {
 		failures = append(failures, SyncFailure{UUID: record.UUID, Detail: detail})
 	}

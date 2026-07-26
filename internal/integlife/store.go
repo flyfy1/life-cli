@@ -13,11 +13,12 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db       *sql.DB
+	notesDir string
 }
 
 const (
-	currentSchemaVersion = 4
+	currentSchemaVersion = 5
 	sqliteBusyTimeoutMS  = 5000
 )
 
@@ -47,7 +48,7 @@ func OpenStore(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	store := &Store{db: db}
+	store := &Store{db: db, notesDir: filepath.Join(filepath.Dir(path), "notes")}
 	if err := store.init(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -141,6 +142,7 @@ func (s *Store) schemaReady() (bool, error) {
 
 	for _, table := range []string{
 		"status_logs",
+		"notes",
 		"todo_lists",
 		"todos",
 		"todo_replies",
@@ -159,6 +161,7 @@ func (s *Store) schemaReady() (bool, error) {
 	}
 
 	for _, index := range []string{
+		"idx_notes_pending",
 		"idx_todo_lists_active_order",
 		"idx_todo_lists_pending",
 		"idx_todos_active_order",
@@ -245,6 +248,9 @@ func migrateSchema(tx *sql.Tx) error {
 		if err := createAISchema(tx); err != nil {
 			return err
 		}
+		if err := createNoteSchema(tx); err != nil {
+			return err
+		}
 		if err := createTodoSchema(tx); err != nil {
 			return err
 		}
@@ -258,6 +264,9 @@ func migrateSchema(tx *sql.Tx) error {
 	}
 
 	if err := createAISchema(tx); err != nil {
+		return err
+	}
+	if err := createNoteSchema(tx); err != nil {
 		return err
 	}
 	if err := createTodoSchema(tx); err != nil {
@@ -340,6 +349,10 @@ func (s *Store) Pending() ([]Record, error) {
 }
 
 func (s *Store) PendingSyncBatch() (SyncBatch, error) {
+	notes, err := s.PendingNotes()
+	if err != nil {
+		return SyncBatch{}, err
+	}
 	statusLogs, err := s.Pending()
 	if err != nil {
 		return SyncBatch{}, err
@@ -369,6 +382,7 @@ func (s *Store) PendingSyncBatch() (SyncBatch, error) {
 		return SyncBatch{}, err
 	}
 	return SyncBatch{
+		Notes:        notes,
 		StatusLogs:   statusLogs,
 		TodoLists:    todoLists,
 		Todos:        todos,
