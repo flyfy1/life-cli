@@ -5,7 +5,6 @@ set -e
 BINARY_NAME="life"
 VERSION=${1:-"dev"}
 BUILD_DIR="./build"
-BUILD_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
 # Target architectures: (OS ARCH)
 TARGETS=(
@@ -30,11 +29,9 @@ for target in "${TARGETS[@]}"; do
         OUTPUT="${OUTPUT}.exe"
     fi
 
-    # Only enable CGO when building for the same OS
+    # The CLI uses the pure-Go modernc SQLite driver, so disabling CGO keeps
+    # every target reproducibly cross-compilable on the same build host.
     CGO_ENABLED=0
-    if [ "$OS" = "$BUILD_OS" ]; then
-        CGO_ENABLED=1
-    fi
 
     echo "Building for $OS/$ARCH -> $OUTPUT (CGO=$CGO_ENABLED)"
 

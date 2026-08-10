@@ -6,10 +6,10 @@ This document describes how to build and release the `life` CLI for multiple arc
 
 ### Method 1: Tag-based Release (Recommended)
 
-1. Create a version tag with the `cli-` prefix:
+1. Create a semantic version tag:
    ```bash
-   git tag cli-v1.0.0
-   git push origin cli-v1.0.0
+   git tag v1.0.0
+   git push origin v1.0.0
    ```
 
 2. GitHub Actions automatically detects the tag and:
@@ -20,7 +20,7 @@ This document describes how to build and release the `life` CLI for multiple arc
 ### Method 2: Manual Workflow Dispatch
 
 1. Go to the [Actions tab](https://github.com/integ-life/life-cli/actions) in GitHub
-2. Select the "Build and Release CLI" workflow
+2. Select the "Release" workflow
 3. Click "Run workflow"
 4. Enter the version (e.g., `v1.0.0`)
 5. Click "Run workflow"
