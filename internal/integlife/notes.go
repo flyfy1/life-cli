@@ -465,8 +465,14 @@ func noteFilename(note NoteRecord) string {
 			break
 		}
 	}
-	stamp := note.CreatedAt.UTC().Format("20060102-1504")
-	return filepath.ToSlash(filepath.Join("inbox", fmt.Sprintf("%s-%s--%s.md", stamp, filenameSlug(title), filenameSlug(note.UUID))))
+	createdAt := note.CreatedAt.UTC()
+	stamp := createdAt.Format("20060102-1504")
+	return filepath.ToSlash(filepath.Join(
+		"ai-tasks",
+		createdAt.Format("2006"),
+		createdAt.Format("01"),
+		fmt.Sprintf("%s-%s--%s.md", stamp, filenameSlug(title), filenameSlug(note.UUID)),
+	))
 }
 
 func filenameSlug(value string) string {

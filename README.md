@@ -101,7 +101,7 @@ Primary variables:
 - `sync` sends every unsynced record in timestamp order.
 - Todo and list writes are local first. If a token is configured, the CLI tries to sync through `/api/notes/sync` immediately and leaves failed records pending.
 - AI task events use a canonical SHA-256 payload hash. `metadata-json` must not contain JSON numbers; use strings for numeric values.
-- AI worklog Markdown files live beside the database in `~/.integlife/notes/`. `life note new` creates a local pending file; edit it directly, then run `life note sync`.
+- AI worklog Markdown files live beside the database in `~/.integlife/notes/ai-tasks/YYYY/MM/`. `life note new` creates a local pending file grouped by creation year and month; edit it directly, then run `life note sync`.
 - Only remote Notes containing `#ai-worklog` are pulled into this cache. Deleting a cached file soft-deletes the remote Note on the next sync.
 - If both copies changed, sync keeps the local file, writes the server copy as `.remote.md`, prints the conflict, and exits non-zero. Merge the files and run `life note resolve <uuid> --local`, or discard local changes with `--remote`.
 - Sync failures do not delete local data.

@@ -25,8 +25,9 @@ func TestAIWorklogUsesEditableMarkdownCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(result.Note.Path, "inbox/") {
-		t.Fatalf("note path = %q", result.Note.Path)
+	wantPrefix := "ai-tasks/2026/07/"
+	if !strings.HasPrefix(result.Note.Path, wantPrefix) {
+		t.Fatalf("note path = %q, want prefix %q", result.Note.Path, wantPrefix)
 	}
 	path := filepath.Join(store.NotesDir(), result.Note.Path)
 	data, err := os.ReadFile(path)
